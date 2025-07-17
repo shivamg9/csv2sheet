@@ -1,0 +1,29 @@
+name: Auto Update Google Sheet
+
+on:
+  schedule:
+    - cron: '25 4 * * *'  # runs daily at 9:55 AM IST
+  workflow_dispatch:      # allows manual run
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11.9'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas gspread oauth2client gspread-formatting google-api-python-client google-auth
+
+      - name: Write credentials to file
+        run: echo '${{ secrets.GSHEETCREDS }}' > creds.json
+
+      - name: Run script
+        run: python update-sheet.py
