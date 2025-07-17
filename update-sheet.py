@@ -6,7 +6,7 @@ from google.oauth2.service_account import Credentials as GoogleCredentials
 import copy
 
 # CONFIG
-CSV_URL = "https://github.com/shivamg9/csv2sheet/blob/main/source.csv"
+CSV_URL = "https://raw.githubusercontent.com/shivamg9/csv2sheet/refs/heads/main/source.csv"
 SPREADSHEET_ID = "1aoT-ponIDn0hLWQ-K8hTYljk9D3P5IgK7ZgvoxE31fU"
 CREDENTIALS_FILE = "creds.json"
 
