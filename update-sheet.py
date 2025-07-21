@@ -116,7 +116,8 @@ try:
             existing_data[r + START_ROW_INDEX][START_COL + c] = aligned_data_block[r][c]
 
     # --- 8. Write All Changes to the Google Sheet ---
-    sheet.update("A1", existing_data, value_input_option='USER_ENTERED')
+    # **FIXED LINE:** Using named arguments to prevent DeprecationWarning
+    sheet.update(range_name="A1", values=existing_data, value_input_option='USER_ENTERED')
 
     # Merge the date header cell
     requests = [{
