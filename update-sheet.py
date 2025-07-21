@@ -16,9 +16,11 @@ START_COL = 9
 BLOCK_WIDTH = 9
 
 def convert_cell(val):
-    """Safely converts a value to an int or float if possible, otherwise returns a stripped string."""
-    # This function now expects a string, not a NaN float
-    if val == '':
+    """
+    Safely converts a string value to an int or float.
+    If the value is blank or cannot be converted, it returns an empty string.
+    """
+    if val is None or val.strip() == '':
         return ''
     try:
         f = float(val)
@@ -43,22 +45,24 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             print(f"Worksheet '{sheet_name}' not found. Creating it.")
             sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="50")
 
-        # --- 2. Read and Parse CSV Data into a Map ---
-        # **FIX 1: Fill all empty cells with '' immediately to prevent NaN issues.**
-        raw = pd.read_csv(csv_path, header=None).fillna('')
+        # --- 2. Read and Parse CSV Data into a Map (Robustly) ---
+        # **FIX 1: Read all data as strings and prevent pandas from creating NaN values.**
+        raw = pd.read_csv(csv_path, header=None, dtype=str, keep_default_na=False)
         if raw.shape[1] < 8 or raw.shape[0] < 2:
             print(f"⚠️ WARNING: CSV '{csv_path}' is incomplete. Skipping.")
             return
 
-        date_label = str(raw.iloc[1, 0]).strip()
-        header_row = [str(raw.iloc[0, i]).strip() for i in range(1, 8)]
+        date_label = raw.iloc[1, 0].strip()
+        header_row = [raw.iloc[0, i].strip() for i in range(1, 8)]
         
         csv_data_map = {}
         for i in range(1, raw.shape[0]):
-            module_name = str(raw.iloc[i, 1]).strip()
-            # **FIX 2: Skip any rows where the module name is blank.**
+            module_name = raw.iloc[i, 1].strip()
+            # **FIX 2: Explicitly skip any rows where the module name is blank.**
             if not module_name:
                 continue
+            
+            # Convert data cells from strings to numbers where possible
             row_data = [convert_cell(raw.iloc[i, j]) for j in range(1, 8)]
             csv_data_map[module_name] = row_data
 
@@ -67,9 +71,9 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         if not existing_data:
             existing_data = [[''] for _ in range(START_ROW_INDEX)]
 
-        # **FIX 3: Robustly get module list, ignoring empty rows/cells.**
         master_module_list = []
         if len(existing_data) > START_ROW_INDEX:
+            # **FIX 3: Ensure we only get valid module names from the sheet.**
             master_module_list = [row[0] for row in existing_data[START_ROW_INDEX:] if row and row[0]]
 
         # --- 4. Identify and Add New Modules ---
@@ -141,12 +145,11 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
 
     except Exception as e:
         print(f"❌ ERROR processing sheet '{sheet_name}': {e}")
+        # Re-raising the exception can help debug in some environments
+        raise
 
 
 def main():
-    """
-    Main function to authenticate and process all CSV files in the source directory.
-    """
     try:
         scope = [
             "https://spreadsheets.google.com/feeds",
@@ -175,7 +178,7 @@ def main():
             update_sheet(service, spreadsheet, sheet_name, csv_path)
 
     except FileNotFoundError:
-        print(f"❌ CRITICAL ERROR: Credentials file '{CREDENTIALS_FILE}' not found. Make sure it's in the root directory.")
+        print(f"❌ CRITICAL ERROR: Credentials file '{CREDENTIALS_FILE}' not found.")
     except Exception as e:
         print(f"❌ A critical error occurred in main(): {e}")
         raise
