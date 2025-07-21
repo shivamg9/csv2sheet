@@ -6,20 +6,20 @@ from google.oauth2.service_account import Credentials as GoogleCredentials
 import os
 
 # --- CONFIGURATION ---
-# Directory containing the source CSV files.
 SOURCE_DIR = "source"
-# Your Google Spreadsheet ID.
 SPREADSHEET_ID = "1aoT-ponIDn0hLWQ-K8hTYljk9D3P5IgK7ZgvoxE31fU"
-# Credentials file name.
 CREDENTIALS_FILE = "creds.json"
 
 # --- CONSTANTS ---
-START_ROW_INDEX = 2  # Data starts from the 3rd row (0-indexed)
-START_COL = 9        # Column J (0-indexed) where the new block will be inserted.
-BLOCK_WIDTH = 9      # Width of the data block (7 columns) plus a 2-column gap.
+START_ROW_INDEX = 2
+START_COL = 9
+BLOCK_WIDTH = 9
 
 def convert_cell(val):
     """Safely converts a value to an int or float if possible, otherwise returns a stripped string."""
+    # This function now expects a string, not a NaN float
+    if val == '':
+        return ''
     try:
         f = float(val)
         if f.is_integer():
@@ -44,7 +44,8 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="50")
 
         # --- 2. Read and Parse CSV Data into a Map ---
-        raw = pd.read_csv(csv_path, header=None)
+        # **FIX 1: Fill all empty cells with '' immediately to prevent NaN issues.**
+        raw = pd.read_csv(csv_path, header=None).fillna('')
         if raw.shape[1] < 8 or raw.shape[0] < 2:
             print(f"⚠️ WARNING: CSV '{csv_path}' is incomplete. Skipping.")
             return
@@ -55,7 +56,8 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         csv_data_map = {}
         for i in range(1, raw.shape[0]):
             module_name = str(raw.iloc[i, 1]).strip()
-            if pd.isna(module_name) or not module_name:
+            # **FIX 2: Skip any rows where the module name is blank.**
+            if not module_name:
                 continue
             row_data = [convert_cell(raw.iloc[i, j]) for j in range(1, 8)]
             csv_data_map[module_name] = row_data
@@ -65,16 +67,21 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         if not existing_data:
             existing_data = [[''] for _ in range(START_ROW_INDEX)]
 
+        # **FIX 3: Robustly get module list, ignoring empty rows/cells.**
         master_module_list = []
         if len(existing_data) > START_ROW_INDEX:
-            master_module_list = [row[0] for row in existing_data[START_ROW_INDEX:]]
+            master_module_list = [row[0] for row in existing_data[START_ROW_INDEX:] if row and row[0]]
 
         # --- 4. Identify and Add New Modules ---
+        new_modules_in_this_run = []
         for module_name in csv_data_map.keys():
             if module_name not in master_module_list:
+                new_modules_in_this_run.append(module_name)
                 master_module_list.append(module_name)
                 existing_data.append([module_name])
-                print(f"  -> New module found: '{module_name}'. Adding to sheet.")
+
+        if new_modules_in_this_run:
+            print(f"  -> New modules found and added: {', '.join(new_modules_in_this_run)}")
             
         # --- 5. Align CSV Data to the Master Module Order ---
         aligned_data_block = []
