@@ -4,6 +4,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials as GoogleCredentials
 import os
+import csv # Using the built-in CSV module
 
 # --- CONFIGURATION ---
 SOURCE_DIR = "source"
@@ -45,25 +46,28 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             print(f"Worksheet '{sheet_name}' not found. Creating it.")
             sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="50")
 
-        # --- 2. Read and Parse CSV Data into a Map (Robustly) ---
-        # **FIX 1: Read all data as strings and prevent pandas from creating NaN values.**
-        raw = pd.read_csv(csv_path, header=None, dtype=str, keep_default_na=False)
-        if raw.shape[1] < 8 or raw.shape[0] < 2:
-            print(f"⚠️ WARNING: CSV '{csv_path}' is incomplete. Skipping.")
+        # --- 2. Read and Parse CSV using the built-in csv module ---
+        raw_rows = []
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            # Filter out any completely empty rows
+            raw_rows = [row for row in reader if any(cell.strip() for cell in row)]
+
+        if len(raw_rows) < 2 or len(raw_rows[0]) < 8:
+            print(f"⚠️ WARNING: CSV '{csv_path}' is incomplete or empty. Skipping.")
             return
 
-        date_label = raw.iloc[1, 0].strip()
-        header_row = [raw.iloc[0, i].strip() for i in range(1, 8)]
-        
+        header_row = [h.strip() for h in raw_rows[0][1:8]]
+        date_label = raw_rows[1][0].strip()
+
         csv_data_map = {}
-        for i in range(1, raw.shape[0]):
-            module_name = raw.iloc[i, 1].strip()
-            # **FIX 2: Explicitly skip any rows where the module name is blank.**
-            if not module_name:
-                continue
-            
-            # Convert data cells from strings to numbers where possible
-            row_data = [convert_cell(raw.iloc[i, j]) for j in range(1, 8)]
+        for row in raw_rows[1:]: # Start from first data row
+            if len(row) < 2 or not row[1].strip():
+                continue # Skip if module name is missing
+
+            module_name = row[1].strip()
+            data_cells = row[1:8]
+            row_data = [convert_cell(cell) for cell in data_cells]
             csv_data_map[module_name] = row_data
 
         # --- 3. Read Existing Sheet and Map Modules ---
@@ -73,25 +77,18 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
 
         master_module_list = []
         if len(existing_data) > START_ROW_INDEX:
-            # **FIX 3: Ensure we only get valid module names from the sheet.**
             master_module_list = [row[0] for row in existing_data[START_ROW_INDEX:] if row and row[0]]
 
         # --- 4. Identify and Add New Modules ---
-        new_modules_in_this_run = []
-        for module_name in csv_data_map.keys():
-            if module_name not in master_module_list:
-                new_modules_in_this_run.append(module_name)
+        new_modules_in_this_run = [m for m in csv_data_map if m not in master_module_list]
+        if new_modules_in_this_run:
+            print(f"  -> New modules found and added: {', '.join(new_modules_in_this_run)}")
+            for module_name in new_modules_in_this_run:
                 master_module_list.append(module_name)
                 existing_data.append([module_name])
 
-        if new_modules_in_this_run:
-            print(f"  -> New modules found and added: {', '.join(new_modules_in_this_run)}")
-            
         # --- 5. Align CSV Data to the Master Module Order ---
-        aligned_data_block = []
-        for module_name in master_module_list:
-            row_to_add = csv_data_map.get(module_name, [''] * 7)
-            aligned_data_block.append(row_to_add)
+        aligned_data_block = [csv_data_map.get(m, [''] * 7) for m in master_module_list]
 
         # --- 6. Prepare Sheet for New Data Block ---
         max_height = len(aligned_data_block)
@@ -136,26 +133,17 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             }
         }]
 
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={"requests": requests}
-        ).execute()
+        service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
 
         print(f"✅ Sheet '{sheet_name}' updated successfully. New block mapped and inserted at column {chr(START_COL + 65)}.")
 
     except Exception as e:
         print(f"❌ ERROR processing sheet '{sheet_name}': {e}")
-        # Re-raising the exception can help debug in some environments
         raise
-
 
 def main():
     try:
-        scope = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/spreadsheets"
-        ]
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
         creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
