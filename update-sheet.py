@@ -33,8 +33,8 @@ def convert_cell(val):
 
 def update_sheet(service, spreadsheet, sheet_name, csv_path):
     """
-    Reads data from a given CSV file, maps it to Column A modules, and inserts it
-    as a new block into the specified worksheet.
+    Reads data from a given CSV file, maps it to Column A modules, inserts it
+    as a new block, and applies conditional font coloring.
     """
     try:
         print(f"--- Processing: {sheet_name} from {csv_path} ---")
@@ -50,7 +50,6 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         raw_rows = []
         with open(csv_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            # Filter out any completely empty rows
             raw_rows = [row for row in reader if any(cell.strip() for cell in row)]
 
         if len(raw_rows) < 2 or len(raw_rows[0]) < 8:
@@ -61,10 +60,9 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         date_label = raw_rows[1][0].strip()
 
         csv_data_map = {}
-        for row in raw_rows[1:]: # Start from first data row
+        for row in raw_rows[1:]:
             if len(row) < 2 or not row[1].strip():
-                continue # Skip if module name is missing
-
+                continue
             module_name = row[1].strip()
             data_cells = row[1:8]
             row_data = [convert_cell(cell) for cell in data_cells]
@@ -74,6 +72,14 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         existing_data = sheet.get_all_values()
         if not existing_data:
             existing_data = [[''] for _ in range(START_ROW_INDEX)]
+
+        # --- NEW: Capture comparison values from columns B-G before modification ---
+        module_comparison_map = {}
+        if len(existing_data) > START_ROW_INDEX:
+            for row in existing_data[START_ROW_INDEX:]:
+                if row and row[0]:
+                    comparison_values = (row[1:7] + [''] * 6)[:6]
+                    module_comparison_map[row[0]] = [convert_cell(v) for v in comparison_values]
 
         master_module_list = []
         if len(existing_data) > START_ROW_INDEX:
@@ -92,12 +98,9 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
 
         # --- 6. Prepare Sheet for New Data Block ---
         max_height = len(aligned_data_block)
-        
         for i in range(len(existing_data)):
             while len(existing_data[i]) < START_COL:
                 existing_data[i].append("")
-
-        for i in range(len(existing_data)):
             row = existing_data[i]
             old_tail = row[START_COL:]
             gap = [""] * BLOCK_WIDTH
@@ -107,10 +110,8 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         if len(existing_data[0]) < START_COL + 7:
             existing_data[0].extend([""] * (START_COL + 7 - len(existing_data[0]) + 2))
         existing_data[0][START_COL] = date_label
-
         for j in range(7):
             existing_data[1][START_COL + j] = header_row[j]
-
         for r in range(max_height):
             for c in range(7):
                 while len(existing_data[r + START_ROW_INDEX]) < START_COL + c + 1:
@@ -120,22 +121,62 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         # --- 8. Write All Changes to the Google Sheet ---
         sheet.update(range_name="A1", values=existing_data, value_input_option='USER_ENTERED')
 
+        # --- 9. Prepare Batch Update Request for Merging and Formatting ---
         requests = [{
             "mergeCells": {
-                "range": {
-                    "sheetId": sheet._properties["sheetId"],
-                    "startRowIndex": 0,
-                    "endRowIndex": 1,
-                    "startColumnIndex": START_COL,
-                    "endColumnIndex": START_COL + 7
-                },
+                "range": {"sheetId": sheet._properties["sheetId"], "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": START_COL, "endColumnIndex": START_COL + 7},
                 "mergeType": "MERGE_ALL"
             }
         }]
+        
+        # --- NEW: Build Formatting Requests ---
+        formatting_requests = []
+        green_color = {"red": 0.0, "green": 0.6, "blue": 0.0} # Darker Green
+        red_color = {"red": 0.8, "green": 0.0, "blue": 0.0}   # Darker Red
 
-        service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
+        for r, module_name in enumerate(master_module_list):
+            new_values_row = aligned_data_block[r]
+            comparison_values = module_comparison_map.get(module_name)
 
-        print(f"✅ Sheet '{sheet_name}' updated successfully. New block mapped and inserted at column {chr(START_COL + 65)}.")
+            if not comparison_values:
+                continue
+
+            # Compare T,P,S,F,I,KI (indices 1-6 in new_values_row) with B-G (indices 0-5 in comparison_values)
+            for c in range(6):
+                new_val = new_values_row[c + 1]
+                comp_val = comparison_values[c]
+                color_to_apply = None
+                try:
+                    if not isinstance(new_val, (int, float)) or not isinstance(comp_val, (int, float)):
+                        raise ValueError("Non-numeric value")
+                    
+                    if new_val >= comp_val:
+                        color_to_apply = green_color
+                    else:
+                        color_to_apply = red_color
+                except (ValueError, TypeError):
+                    pass # Keep color black if values are not numbers
+
+                if color_to_apply:
+                    formatting_requests.append({
+                        "updateCells": {
+                            "rows": [{"values": [{"userEnteredFormat": {"textFormat": {"foregroundColor": color_to_apply}}}]}],
+                            "fields": "userEnteredFormat.textFormat.foregroundColor",
+                            "range": {
+                                "sheetId": sheet._properties["sheetId"],
+                                "startRowIndex": START_ROW_INDEX + r,
+                                "endRowIndex": START_ROW_INDEX + r + 1,
+                                "startColumnIndex": START_COL + c + 1,
+                                "endColumnIndex": START_COL + c + 2,
+                            }
+                        }
+                    })
+        
+        requests.extend(formatting_requests)
+        if requests:
+            service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
+
+        print(f"✅ Sheet '{sheet_name}' updated successfully. New block mapped, inserted, and colored at column {chr(START_COL + 65)}.")
 
     except Exception as e:
         print(f"❌ ERROR processing sheet '{sheet_name}': {e}")
