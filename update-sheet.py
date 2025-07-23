@@ -91,20 +91,19 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, has_reference_dat
             current_cell_a1 = f"{col_to_a1(current_col_idx)}{START_ROW_INDEX + 1}"
             ref_cell_a1 = f"{ref_col_a1}{START_ROW_INDEX + 1}"
             
-            base_formula = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})))"
-            
             conditions = {
-                "T":  (f"={current_cell_a1}={ref_cell_a1}", f"={current_cell_a1}<>{ref_cell_a1}"),
-                "P":  (f"={current_cell_a1}>={ref_cell_a1}", f"={current_cell_a1}<{ref_cell_a1}"),
-                "S":  (f"={current_cell_a1}<={ref_cell_a1}", f"={current_cell_a1}>{ref_cell_a1}"),
-                "F":  (f"={current_cell_a1}<={ref_cell_a1}", f"={current_cell_a1}>{ref_cell_a1}"),
-                "I":  (f"={current_cell_a1}<={ref_cell_a1}", f"={current_cell_a1}>{ref_cell_a1}"),
-                "KI": (f"={current_cell_a1}<={ref_cell_a1}", f"={current_cell_a1}>{ref_cell_a1}")
+                "T":  (f"{current_cell_a1}={ref_cell_a1}", f"{current_cell_a1}<>{ref_cell_a1}"),
+                "P":  (f"{current_cell_a1}>={ref_cell_a1}", f"{current_cell_a1}<{ref_cell_a1}"),
+                "S":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+                "F":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+                "I":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+                "KI": (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}")
             }
             green_cond, red_cond = conditions[col_header]
 
-            green_formula = base_formula.replace(")", f", {green_cond.lstrip('=')})")
-            red_formula = base_formula.replace(")", f", {red_cond.lstrip('=')})")
+            # *** FIX IS HERE: Constructing the formula correctly and robustly ***
+            green_formula = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {green_cond.lstrip('=')})"
+            red_formula = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {red_cond.lstrip('=')})"
             
             # Rule for Green Text
             green_rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": green_formula}]}, "format": {"textFormat": {"foregroundColor": COLORS["green"]}}}}
@@ -127,15 +126,23 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         print(f"Worksheet '{sheet_name}' not found. Creating it.")
         sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="50")
 
+    # This logic now handles multi-data-block CSVs by parsing only the first block
+    all_rows = []
     with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = list(csv.reader(f))
-    if len(reader) < 2 or len(reader[0]) < NUM_DATA_COLS + 2:
-        print(f"⚠️ WARNING: CSV '{csv_path}' is incomplete. Skipping.")
+        reader = csv.reader(f)
+        for row in reader:
+            # Each block is 10 columns wide, the first block is columns 0-9
+            first_block = row[:10]
+            if any(cell.strip() for cell in first_block):
+                 all_rows.append(first_block)
+
+    if len(all_rows) < 2 or len(all_rows[0]) < NUM_DATA_COLS + 2:
+        print(f"⚠️ WARNING: First data block in CSV '{csv_path}' is incomplete. Skipping.")
         return
 
-    date_label = reader[1][0].strip()
-    csv_headers = [h.strip() for h in reader[0][2:2 + NUM_DATA_COLS]]
-    csv_data_map = {row[1].strip(): [convert_cell(c) for c in row[2:2 + NUM_DATA_COLS]] for row in reader[1:] if row and len(row) > 1 and row[1].strip()}
+    date_label = all_rows[1][0].strip()
+    csv_headers = [h.strip() for h in all_rows[0][2:2 + NUM_DATA_COLS]]
+    csv_data_map = {row[1].strip(): [convert_cell(c) for c in row[2:2 + NUM_DATA_COLS]] for row in all_rows[1:] if row and len(row) > 1 and row[1].strip()}
 
     existing_data = sheet.get_all_values()
     master_module_list = [row[0] for row in existing_data[START_ROW_INDEX:] if row and row[0]] if len(existing_data) > START_ROW_INDEX else []
@@ -144,15 +151,18 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     if new_modules:
         print(f"  -> New modules found: {', '.join(new_modules)}")
         new_rows = [[m] for m in new_modules]
-        sheet.append_rows(values=new_rows, value_input_option='USER_ENTERED', table_range="A1")
-        master_module_list.extend(new_modules)
+        sheet.append_rows(values=new_rows, value_input_option='USER_ENTERED', table_range=f"A{len(master_module_list) + START_ROW_INDEX + 1}")
+        master_module_list.extend(new_modules) # Update our local list
     
     aligned_data_block = [csv_data_map.get(m, [None] * NUM_DATA_COLS) for m in master_module_list]
 
     sheet_headers = existing_data[0] if existing_data else []
     target_col = -1
     if date_label in sheet_headers:
-        target_col = sheet_headers.index(date_label)
+        try:
+            target_col = sheet_headers.index(date_label)
+        except ValueError:
+            target_col = -1 # Should not happen, but for safety
         
     if target_col != -1:
         print(f"  -> Date '{date_label}' found. Updating columns in place.")
@@ -161,10 +171,11 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         print(f"  -> Date '{date_label}' not found. Inserting new columns.")
         target_col = START_COL
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}]}).execute()
+        # After inserting, check again if there's now data to the right to compare against
         has_reference_data = len(sheet_headers) > START_COL and sheet_headers[START_COL]
 
-    # Write data using named arguments to avoid deprecation warnings
-    sheet.update_cell(1, target_col + 1, date_label)
+    # Write data using named arguments
+    sheet.update(range_name=f"{col_to_a1(target_col)}{1}", values=[[date_label]])
     sheet.update(range_name=f"{col_to_a1(target_col)}{2}", values=[csv_headers])
     sheet.update(range_name=f"{col_to_a1(target_col)}{START_ROW_INDEX + 1}", values=aligned_data_block, value_input_option='USER_ENTERED')
     
