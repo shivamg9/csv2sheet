@@ -18,9 +18,9 @@ BLOCK_WIDTH = 9
 
 # --- FORMATTING STYLES ---
 COLORS = {
-    "red": {"red": 0.9, "green": 0.6, "blue": 0.6},
-    "green": {"red": 0.7, "green": 0.9, "blue": 0.7},
-    "light_grey": {"red": 0.85, "green": 0.85, "blue": 0.85}
+    "red": {"red": 1.0, "green": 0.0, "blue": 0.0},
+    "green": {"red": 0.0, "green": 0.6, "blue": 0.1},
+    "light_grey_fill": {"red": 0.85, "green": 0.85, "blue": 0.85}
 }
 BORDER = {"style": "SOLID", "width": 1}
 
@@ -61,11 +61,11 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, has_reference_dat
     # 2. Merge Date Header
     requests.append({"mergeCells": {"range": {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "mergeType": "MERGE_ALL"}})
 
-    # 3. Style 'T, P, S...' Headers
+    # 3. Style 'T, P, S...' Headers (Grey Fill, Bold Text)
     requests.append({
         "repeatCell": {
             "range": {"sheetId": sheet_gid, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": target_col, "endColumnIndex": data_end_col},
-            "cell": {"userEnteredFormat": {"backgroundColor": COLORS["light_grey"], "textFormat": {"bold": True}}},
+            "cell": {"userEnteredFormat": {"backgroundColor": COLORS["light_grey_fill"], "textFormat": {"bold": True}}},
             "fields": "userEnteredFormat(backgroundColor,textFormat)"
         }
     })
@@ -75,17 +75,18 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, has_reference_dat
     requests.append({"updateBorders": {"range": border_range, "top": BORDER, "bottom": BORDER, "left": BORDER, "right": BORDER}})
     requests.append({"updateBorders": {"range": border_range, "innerHorizontal": BORDER, "innerVertical": BORDER}})
 
-    # 5. Conditional Formatting Rules
+    # 5. Conditional Formatting Rules (for Text Color)
     cond_format_rules = []
     for i, col_header in enumerate(["T", "P", "S", "F", "I", "KI"]):
         current_col_idx = target_col + i
-        # *** FIX IS HERE: Changed "endIndex" to "endColumnIndex" ***
         rule_range = {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX, "startColumnIndex": current_col_idx, "endColumnIndex": current_col_idx + 1}
         
         if not has_reference_data:
-            rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "NOT_BLANK"}, "format": {"backgroundColor": COLORS["red"]}}}
+            # When no base reference, make text red
+            rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "NOT_BLANK"}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}
             cond_format_rules.append({"addConditionalFormatRule": {"rule": rule, "index": 0}})
         else:
+            # Rules with reference comparison
             ref_col_a1 = col_to_a1(ref_col + i)
             current_cell_a1 = f"{col_to_a1(current_col_idx)}{START_ROW_INDEX + 1}"
             ref_cell_a1 = f"{ref_col_a1}{START_ROW_INDEX + 1}"
@@ -104,9 +105,11 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, has_reference_dat
 
             green_formula = base_formula.replace(")", f", {green_cond.lstrip('=')})")
             red_formula = base_formula.replace(")", f", {red_cond.lstrip('=')})")
-
-            green_rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": green_formula}]}, "format": {"backgroundColor": COLORS["green"]}}}
-            red_rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula}]}, "format": {"backgroundColor": COLORS["red"]}}}
+            
+            # Rule for Green Text
+            green_rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": green_formula}]}, "format": {"textFormat": {"foregroundColor": COLORS["green"]}}}}
+            # Rule for Red Text
+            red_rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}
             
             cond_format_rules.append({"addConditionalFormatRule": {"rule": green_rule, "index": 0}})
             cond_format_rules.append({"addConditionalFormatRule": {"rule": red_rule, "index": 0}})
