@@ -33,64 +33,20 @@ def col_to_a1(col_idx):
     return a1
 
 def convert_cell(val):
-    """Safely converts a string value to a number or returns it as a string."""
+    """Safely converts a string value to a number, returning the original if it fails."""
     if val is None or str(val).strip() == '':
-        return None
+        return ''
     try:
         f = float(val)
         return int(f) if f.is_integer() else f
     except (ValueError, TypeError):
         return str(val).strip()
 
-def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
-    """Builds and executes all formatting requests for a data block."""
-    requests = []
-    data_end_col = target_col + NUM_DATA_COLS
-
-    # --- Standard Formatting (Borders, Headers, etc.) ---
-    requests.append({"updateDimensionProperties": {"range": {"sheetId": sheet_gid, "dimension": "COLUMNS", "startIndex": target_col, "endIndex": data_end_col}, "properties": {"pixelSize": 80}, "fields": "pixelSize"}})
-    requests.append({"mergeCells": {"range": {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "mergeType": "MERGE_ALL"}})
-    requests.append({"repeatCell": {"range": {"sheetId": sheet_gid, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "cell": {"userEnteredFormat": {"backgroundColor": COLORS["light_grey_fill"], "textFormat": {"bold": True}}}, "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
-    border_range = {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": START_ROW_INDEX + max_rows, "startColumnIndex": target_col, "endColumnIndex": data_end_col}
-    requests.append({"updateBorders": {"range": border_range, "top": BORDER, "bottom": BORDER, "left": BORDER, "right": BORDER}})
-    requests.append({"updateBorders": {"range": border_range, "innerHorizontal": BORDER, "innerVertical": BORDER}})
-
-    # --- Conditional Formatting ---
-    # We create a set of rules for each column that are self-contained.
-    for i, col_header in enumerate(["T", "P", "S", "F", "I", "KI"]):
-        current_col_idx = target_col + i
-        ref_col_idx = target_col + BLOCK_WIDTH + i
-        
-        rule_range = {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX, "endRowIndex": START_ROW_INDEX + max_rows, "startColumnIndex": current_col_idx, "endColumnIndex": current_col_idx + 1}
-        
-        current_cell_a1 = f"{col_to_a1(current_col_idx)}{START_ROW_INDEX + 1}"
-        ref_cell_a1 = f"{col_to_a1(ref_col_idx)}{START_ROW_INDEX + 1}"
-        
-        conditions = {
-            "T":  (f"{current_cell_a1}={ref_cell_a1}", f"{current_cell_a1}<>{ref_cell_a1}"),
-            "P":  (f"{current_cell_a1}>={ref_cell_a1}", f"{current_cell_a1}<{ref_cell_a1}"),
-            "S":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
-            "F":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
-            "I":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
-            "KI": (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}")
-        }
-        green_cond, red_cond = conditions[col_header]
-
-        # Rule formulas
-        green_formula = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {green_cond.lstrip('=')})"
-        red_formula_comp = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {red_cond.lstrip('=')})"
-        red_formula_no_ref = f"=AND(NOT(ISBLANK({current_cell_a1})), ISBLANK({ref_cell_a1}))"
-
-        # Create rule requests. They are applied with priority based on their position in the list.
-        # The first rule in the list has the highest priority.
-        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": green_formula}]}, "format": {"textFormat": {"foregroundColor": COLORS["green"]}}}}, "index": 0}})
-        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula_comp}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 1}})
-        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula_no_ref}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 2}})
-
-    if requests:
-        service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
-
 def update_sheet(service, spreadsheet, sheet_name, csv_path):
+    """
+    Reads data from a given CSV file, maps it, inserts or updates it in the sheet,
+    and applies direct font coloring based on comparison logic.
+    """
     try:
         print(f"--- Processing: {sheet_name} from {csv_path} ---")
         sheet = spreadsheet.worksheet(sheet_name)
@@ -98,6 +54,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         print(f"Worksheet '{sheet_name}' not found. Creating it.")
         sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="50")
 
+    # --- 1. Parse ONLY the first data block from the CSV ---
     first_block_rows = []
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = csv.reader(f)
@@ -106,32 +63,39 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             if any(cell.strip() for cell in block_segment):
                 first_block_rows.append(block_segment)
 
-    if len(first_block_rows) < 2 or len(first_block_rows[0]) < NUM_DATA_COLS + 2:
-        print(f"⚠️ WARNING: First data block in CSV '{csv_path}' is incomplete. Skipping.")
+    if len(first_block_rows) < 2:
+        print(f"⚠️ WARNING: CSV '{csv_path}' has no data rows. Skipping.")
         return
 
     date_label = first_block_rows[1][0].strip()
     csv_headers = [h.strip() for h in first_block_rows[0][2:2 + NUM_DATA_COLS]]
     csv_data_map = {row[1].strip(): [convert_cell(c) for c in row[2:2 + NUM_DATA_COLS]] for row in first_block_rows[1:] if len(row) > 1 and row[1].strip()}
 
+    # --- 2. Determine Target Column and Get Existing Sheet Data ---
     existing_data = sheet.get_all_values()
-    master_module_list = [row[0] for row in existing_data[START_ROW_INDEX:] if row and row[0]] if len(existing_data) > START_ROW_INDEX else []
-    
-    new_modules = [m for m in csv_data_map if m not in master_module_list]
-    if new_modules:
-        print(f"  -> New modules found: {', '.join(new_modules)}")
-        new_rows = [[m] for m in new_modules]
-        # Use gspread to append rows, as it's simple and effective for this task.
-        sheet.append_rows(values=new_rows, value_input_option='USER_ENTERED', table_range=f"A{len(master_module_list) + START_ROW_INDEX + 1}")
-        master_module_list.extend(new_modules)
-    
-    aligned_data_block = [csv_data_map.get(m, [None] * NUM_DATA_COLS) for m in master_module_list]
-
     sheet_headers = existing_data[0] if existing_data else []
+    
     target_col = -1
     if date_label in sheet_headers:
         target_col = sheet_headers.index(date_label)
 
+    # --- 3. Capture Reference Data BEFORE Making Changes ---
+    reference_data_map = {}
+    ref_col_start = -1
+    if target_col != -1: # Updating in place
+        ref_col_start = target_col + BLOCK_WIDTH
+    else: # Inserting new
+        ref_col_start = START_COL
+
+    if len(existing_data) > START_ROW_INDEX and len(sheet_headers) > ref_col_start:
+        print(f"  -> Found reference data starting at column {col_to_a1(ref_col_start)}.")
+        for r_idx, row in enumerate(existing_data[START_ROW_INDEX:]):
+            module_name = row[0]
+            if module_name:
+                ref_values = (row[ref_col_start : ref_col_start + NUM_DATA_COLS] + [''] * NUM_DATA_COLS)[:NUM_DATA_COLS]
+                reference_data_map[module_name] = [convert_cell(v) for v in ref_values]
+
+    # --- 4. Insert or Identify Columns for the New Data ---
     if target_col == -1:
         print(f"  -> Date '{date_label}' not found. Inserting new columns.")
         target_col = START_COL
@@ -139,7 +103,18 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     else:
         print(f"  -> Date '{date_label}' found. Updating columns in place.")
 
-    # Use a single batchUpdate to write all data efficiently.
+    # --- 5. Align Data and Prepare for Update ---
+    master_module_list = [row[0] for row in existing_data[START_ROW_INDEX:] if row and row[0]] if len(existing_data) > START_ROW_INDEX else []
+    new_modules = [m for m in csv_data_map if m not in master_module_list]
+    if new_modules:
+        print(f"  -> New modules found: {', '.join(new_modules)}")
+        new_rows_data = [[m] + [None]*NUM_DATA_COLS for m in new_modules]
+        sheet.append_rows(values=new_rows_data, value_input_option='USER_ENTERED', table_range="A1")
+        master_module_list.extend(new_modules)
+        
+    aligned_data_block = [csv_data_map.get(m, [None] * NUM_DATA_COLS) for m in master_module_list]
+
+    # --- 6. Write Data to Sheet ---
     update_body = {
         "valueInputOption": "USER_ENTERED",
         "data": [
@@ -149,12 +124,68 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         ]
     }
     service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
+
+    # --- 7. Apply Direct Formatting and Borders ---
+    print("  -> Applying direct formatting...")
+    requests = []
     
-    print("  -> Applying formatting...")
-    # Clear any old rules on the target columns before applying new ones to prevent conflicts.
-    service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"deleteConditionalFormatRule": {"sheetId": sheet.id, "index": 0}} for _ in range(NUM_DATA_COLS * 3)]}).execute()
-    apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, len(master_module_list))
+    # Define comparison logic
+    comparison_logic = {
+        "T": lambda n, r: n == r,
+        "P": lambda n, r: n >= r,
+        "S": lambda n, r: n <= r,
+        "F": lambda n, r: n <= r,
+        "I": lambda n, r: n <= r,
+        "KI": lambda n, r: n <= r
+    }
+
+    for r_idx, module_name in enumerate(master_module_list):
+        ref_row = reference_data_map.get(module_name)
+        new_row = aligned_data_block[r_idx]
+
+        for c_idx, header in enumerate(csv_headers):
+            color_to_apply = None
+            new_val = new_row[c_idx]
+
+            if ref_row:
+                ref_val = ref_row[c_idx]
+                try:
+                    if not isinstance(new_val, (int, float)) or not isinstance(ref_val, (int, float)):
+                        raise TypeError() # Not a number, don't color
+                    
+                    if comparison_logic[header](new_val, ref_val):
+                        color_to_apply = COLORS["green"]
+                    else:
+                        color_to_apply = COLORS["red"]
+                except (TypeError, KeyError):
+                    pass # Non-numeric or header not in logic map
+            elif isinstance(new_val, (int, float)): # No reference data, color all numbers red
+                color_to_apply = COLORS["red"]
+
+            if color_to_apply:
+                requests.append({
+                    "updateCells": {
+                        "rows": [{"values": [{"userEnteredFormat": {"textFormat": {"foregroundColor": color_to_apply}}}]}],
+                        "fields": "userEnteredFormat.textFormat.foregroundColor",
+                        "range": { "sheetId": sheet.id, "startRowIndex": START_ROW_INDEX + r_idx, "endRowIndex": START_ROW_INDEX + r_idx + 1, "startColumnIndex": target_col + c_idx, "endColumnIndex": target_col + c_idx + 1 }
+                    }
+                })
+
+    # Add cosmetic requests
+    data_end_col = target_col + NUM_DATA_COLS
+    max_rows = len(master_module_list)
+    border_range = {"sheetId": sheet.id, "startRowIndex": 0, "endRowIndex": START_ROW_INDEX + max_rows, "startColumnIndex": target_col, "endColumnIndex": data_end_col}
+    requests.extend([
+        {"updateDimensionProperties": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": target_col, "endIndex": data_end_col}, "properties": {"pixelSize": 80}, "fields": "pixelSize"}},
+        {"mergeCells": {"range": {"sheetId": sheet.id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "mergeType": "MERGE_ALL"}},
+        {"repeatCell": {"range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "cell": {"userEnteredFormat": {"backgroundColor": COLORS["light_grey_fill"], "textFormat": {"bold": True}}}, "fields": "userEnteredFormat(backgroundColor,textFormat)"}},
+        {"updateBorders": {"range": border_range, "top": BORDER, "bottom": BORDER, "left": BORDER, "right": BORDER}},
+        {"updateBorders": {"range": border_range, "innerHorizontal": BORDER, "innerVertical": BORDER}}
+    ])
     
+    if requests:
+        service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
+
     print(f"✅ Sheet '{sheet_name}' updated successfully.")
 
 def main():
@@ -163,7 +194,6 @@ def main():
         creds = GoogleCredentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
         service = build("sheets", "v4", credentials=creds)
         
-        # Use gspread for simple operations like opening the sheet
         from oauth2client.service_account import ServiceAccountCredentials as GSpreadCredentials
         gspread_creds = GSpreadCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
         client = gspread.authorize(gspread_creds)
@@ -174,10 +204,6 @@ def main():
             return
 
         csv_files = sorted([f for f in os.listdir(SOURCE_DIR) if f.endswith(".csv")])
-        if not csv_files:
-            print("No CSV files found in 'source' directory. Nothing to do.")
-            return
-
         for filename in csv_files:
             sheet_name = os.path.splitext(filename)[0]
             csv_path = os.path.join(SOURCE_DIR, filename)
