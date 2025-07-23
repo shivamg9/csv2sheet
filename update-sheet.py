@@ -1,7 +1,6 @@
 import os
 import csv
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from google.oauth2.service_account import Credentials as GoogleCredentials
 from googleapiclient.discovery import build
 
@@ -14,7 +13,7 @@ CREDENTIALS_FILE = "creds.json"
 START_ROW_INDEX = 2
 START_COL = 9
 NUM_DATA_COLS = 6
-BLOCK_WIDTH = 9 # Number of columns for a full data block with spacing
+BLOCK_WIDTH = 9
 
 # --- FORMATTING STYLES ---
 COLORS = {
@@ -43,53 +42,51 @@ def convert_cell(val):
     except (ValueError, TypeError):
         return str(val).strip()
 
-def apply_formatting(service, sheet_id, sheet_gid, target_col, has_reference_data, max_rows):
+def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
     """Builds and executes all formatting requests for a data block."""
     requests = []
-    ref_col = target_col + BLOCK_WIDTH
     data_end_col = target_col + NUM_DATA_COLS
 
+    # --- Standard Formatting (Borders, Headers, etc.) ---
     requests.append({"updateDimensionProperties": {"range": {"sheetId": sheet_gid, "dimension": "COLUMNS", "startIndex": target_col, "endIndex": data_end_col}, "properties": {"pixelSize": 80}, "fields": "pixelSize"}})
     requests.append({"mergeCells": {"range": {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "mergeType": "MERGE_ALL"}})
     requests.append({"repeatCell": {"range": {"sheetId": sheet_gid, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "cell": {"userEnteredFormat": {"backgroundColor": COLORS["light_grey_fill"], "textFormat": {"bold": True}}}, "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
-    
     border_range = {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": START_ROW_INDEX + max_rows, "startColumnIndex": target_col, "endColumnIndex": data_end_col}
     requests.append({"updateBorders": {"range": border_range, "top": BORDER, "bottom": BORDER, "left": BORDER, "right": BORDER}})
     requests.append({"updateBorders": {"range": border_range, "innerHorizontal": BORDER, "innerVertical": BORDER}})
 
-    cond_format_rules = []
+    # --- Conditional Formatting ---
+    # We create a set of rules for each column that are self-contained.
     for i, col_header in enumerate(["T", "P", "S", "F", "I", "KI"]):
         current_col_idx = target_col + i
-        rule_range = {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX, "startColumnIndex": current_col_idx, "endColumnIndex": current_col_idx + 1}
+        ref_col_idx = target_col + BLOCK_WIDTH + i
         
-        if not has_reference_data:
-            rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "NOT_BLANK"}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}
-            cond_format_rules.append({"addConditionalFormatRule": {"rule": rule, "index": 0}})
-        else:
-            ref_col_a1 = col_to_a1(ref_col + i)
-            current_cell_a1 = f"{col_to_a1(current_col_idx)}{START_ROW_INDEX + 1}"
-            ref_cell_a1 = f"{ref_col_a1}{START_ROW_INDEX + 1}"
-            
-            conditions = {
-                "T":  (f"{current_cell_a1}={ref_cell_a1}", f"{current_cell_a1}<>{ref_cell_a1}"),
-                "P":  (f"{current_cell_a1}>={ref_cell_a1}", f"{current_cell_a1}<{ref_cell_a1}"),
-                "S":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
-                "F":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
-                "I":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
-                "KI": (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}")
-            }
-            green_cond, red_cond = conditions[col_header]
+        rule_range = {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX, "endRowIndex": START_ROW_INDEX + max_rows, "startColumnIndex": current_col_idx, "endColumnIndex": current_col_idx + 1}
+        
+        current_cell_a1 = f"{col_to_a1(current_col_idx)}{START_ROW_INDEX + 1}"
+        ref_cell_a1 = f"{col_to_a1(ref_col_idx)}{START_ROW_INDEX + 1}"
+        
+        conditions = {
+            "T":  (f"{current_cell_a1}={ref_cell_a1}", f"{current_cell_a1}<>{ref_cell_a1}"),
+            "P":  (f"{current_cell_a1}>={ref_cell_a1}", f"{current_cell_a1}<{ref_cell_a1}"),
+            "S":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+            "F":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+            "I":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+            "KI": (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}")
+        }
+        green_cond, red_cond = conditions[col_header]
 
-            green_formula = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {green_cond.lstrip('=')})"
-            red_formula = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {red_cond.lstrip('=')})"
-            
-            green_rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": green_formula}]}, "format": {"textFormat": {"foregroundColor": COLORS["green"]}}}}
-            red_rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}
-            
-            cond_format_rules.append({"addConditionalFormatRule": {"rule": green_rule, "index": 0}})
-            cond_format_rules.append({"addConditionalFormatRule": {"rule": red_rule, "index": 0}})
+        # Rule formulas
+        green_formula = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {green_cond.lstrip('=')})"
+        red_formula_comp = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {red_cond.lstrip('=')})"
+        red_formula_no_ref = f"=AND(NOT(ISBLANK({current_cell_a1})), ISBLANK({ref_cell_a1}))"
 
-    requests.extend(cond_format_rules)
+        # Create rule requests. They are applied with priority based on their position in the list.
+        # The first rule in the list has the highest priority.
+        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": green_formula}]}, "format": {"textFormat": {"foregroundColor": COLORS["green"]}}}}, "index": 0}})
+        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula_comp}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 1}})
+        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula_no_ref}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 2}})
+
     if requests:
         service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
 
@@ -101,13 +98,11 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         print(f"Worksheet '{sheet_name}' not found. Creating it.")
         sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="50")
 
-    # *** FIX #1: Only parse the FIRST data block from any CSV ***
     first_block_rows = []
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = csv.reader(f)
         for row in reader:
-            # A block is ~10 columns wide. We take the first part of the row.
-            block_segment = row[:10] 
+            block_segment = row[:10]
             if any(cell.strip() for cell in block_segment):
                 first_block_rows.append(block_segment)
 
@@ -126,6 +121,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     if new_modules:
         print(f"  -> New modules found: {', '.join(new_modules)}")
         new_rows = [[m] for m in new_modules]
+        # Use gspread to append rows, as it's simple and effective for this task.
         sheet.append_rows(values=new_rows, value_input_option='USER_ENTERED', table_range=f"A{len(master_module_list) + START_ROW_INDEX + 1}")
         master_module_list.extend(new_modules)
     
@@ -133,28 +129,31 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
 
     sheet_headers = existing_data[0] if existing_data else []
     target_col = -1
-    try:
+    if date_label in sheet_headers:
         target_col = sheet_headers.index(date_label)
-    except ValueError:
-        pass # Not found, target_col remains -1
-        
-    if target_col != -1:
-        print(f"  -> Date '{date_label}' found. Updating columns in place.")
-        # *** FIX #2 (Update Case): Correctly check for reference data ***
-        has_reference_data = len(sheet_headers) > target_col + BLOCK_WIDTH and sheet_headers[target_col + BLOCK_WIDTH]
-    else:
+
+    if target_col == -1:
         print(f"  -> Date '{date_label}' not found. Inserting new columns.")
         target_col = START_COL
-        # *** FIX #2 (Insert Case): Check for reference data BEFORE inserting ***
-        has_reference_data = len(sheet_headers) > START_COL and sheet_headers[START_COL]
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}]}).execute()
+    else:
+        print(f"  -> Date '{date_label}' found. Updating columns in place.")
 
-    sheet.update(range_name=f"{col_to_a1(target_col)}1", values=[[date_label]])
-    sheet.update(range_name=f"{col_to_a1(target_col)}2", values=[csv_headers])
-    sheet.update(range_name=f"{col_to_a1(target_col)}{START_ROW_INDEX + 1}", values=aligned_data_block, value_input_option='USER_ENTERED')
+    # Use a single batchUpdate to write all data efficiently.
+    update_body = {
+        "valueInputOption": "USER_ENTERED",
+        "data": [
+            {"range": f"{sheet.title}!{col_to_a1(target_col)}1", "values": [[date_label]]},
+            {"range": f"{sheet.title}!{col_to_a1(target_col)}2", "values": [csv_headers]},
+            {"range": f"{sheet.title}!{col_to_a1(target_col)}{START_ROW_INDEX + 1}", "values": aligned_data_block}
+        ]
+    }
+    service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
     
-    print(f"  -> Applying formatting (Reference found: {has_reference_data})...")
-    apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, has_reference_data, len(master_module_list))
+    print("  -> Applying formatting...")
+    # Clear any old rules on the target columns before applying new ones to prevent conflicts.
+    service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"deleteConditionalFormatRule": {"sheetId": sheet.id, "index": 0}} for _ in range(NUM_DATA_COLS * 3)]}).execute()
+    apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, len(master_module_list))
     
     print(f"✅ Sheet '{sheet_name}' updated successfully.")
 
@@ -164,7 +163,9 @@ def main():
         creds = GoogleCredentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
         service = build("sheets", "v4", credentials=creds)
         
-        gspread_creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        # Use gspread for simple operations like opening the sheet
+        from oauth2client.service_account import ServiceAccountCredentials as GSpreadCredentials
+        gspread_creds = GSpreadCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
         client = gspread.authorize(gspread_creds)
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
 
