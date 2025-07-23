@@ -51,78 +51,24 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         with open(csv_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
             # Filter out any completely empty rows
-            raw_rows = [row for row in reader if any(cell.strip() for cell in row if cell)]
+            raw_rows = [row for row in reader if any(cell.strip() for cell in row)]
 
-        if len(raw_rows) < 2:
-            print(f"⚠️ WARNING: CSV '{csv_path}' has insufficient data. Skipping.")
+        if len(raw_rows) < 2 or len(raw_rows[0]) < 8:
+            print(f"⚠️ WARNING: CSV '{csv_path}' is incomplete or empty. Skipping.")
             return
 
-        # Find the first row with valid data and extract date from it
-        date_label = None
-        first_data_row_idx = None
-        
-        for i in range(1, len(raw_rows)):
-            row = raw_rows[i]
-            if len(row) > 0 and row[0].strip():
-                date_label = row[0].strip()
-                first_data_row_idx = i
-                break
-        
-        if not date_label or first_data_row_idx is None:
-            print(f"⚠️ WARNING: No valid date found in CSV '{csv_path}'. Skipping.")
-            return
-
-        # Extract header from first row, ensuring we have at least 6 columns for T,P,S,F,I,KI
-        header_row = []
-        if len(raw_rows[0]) >= 8:
-            header_row = [h.strip() for h in raw_rows[0][2:8]]
-        else:
-            # If header is incomplete, use default labels
-            header_row = ['T', 'P', 'S', 'F', 'I', 'KI']
-        
-        # Ensure we have exactly 6 header labels
-        while len(header_row) < 6:
-            header_row.append('')
+        header_row = [h.strip() for h in raw_rows[0][2:8]]
+        date_label = raw_rows[1][0].strip()
 
         csv_data_map = {}
-        
-        # Process all data rows, handling multi-column format
-        for row in raw_rows[1:]:
-            if not row:
-                continue
-                
-            # Handle multi-column format - look for data in different positions
-            # First column set (columns 0-7)
-            if len(row) > 1 and row[1].strip():
-                module_name = row[1].strip()
-                data_cells = row[2:8] if len(row) >= 8 else row[2:] + [''] * (8 - len(row))
-                row_data = [convert_cell(cell) for cell in data_cells[:6]]
-                csv_data_map[module_name] = row_data
-            
-            # Second column set (columns 10-17) - if exists
-            if len(row) > 11 and row[11].strip():
-                module_name = row[11].strip()
-                data_cells = row[12:18] if len(row) >= 18 else row[12:] + [''] * (18 - len(row))
-                row_data = [convert_cell(cell) for cell in data_cells[:6]]
-                csv_data_map[module_name] = row_data
-            
-            # Third column set (columns 20-27) - if exists
-            if len(row) > 21 and row[21].strip():
-                module_name = row[21].strip()
-                data_cells = row[22:28] if len(row) >= 28 else row[22:] + [''] * (28 - len(row))
-                row_data = [convert_cell(cell) for cell in data_cells[:6]]
-                csv_data_map[module_name] = row_data
-            
-            # Fourth column set (columns 30-37) - if exists
-            if len(row) > 31 and row[31].strip():
-                module_name = row[31].strip()
-                data_cells = row[32:38] if len(row) >= 38 else row[32:] + [''] * (38 - len(row))
-                row_data = [convert_cell(cell) for cell in data_cells[:6]]
-                csv_data_map[module_name] = row_data
+        for row in raw_rows[1:]: # Start from first data row
+            if len(row) < 2 or not row[1].strip():
+                continue # Skip if module name is missing
 
-        if not csv_data_map:
-            print(f"⚠️ WARNING: No valid module data found in CSV '{csv_path}'. Skipping.")
-            return
+            module_name = row[1].strip()
+            data_cells = row[2:8]
+            row_data = [convert_cell(cell) for cell in data_cells]
+            csv_data_map[module_name] = row_data
 
         # --- 3. Read Existing Sheet and Map Modules ---
         existing_data = sheet.get_all_values()
@@ -147,17 +93,13 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         # --- 6. Prepare Sheet for New Data Block ---
         max_height = len(aligned_data_block)
         
-        # Ensure existing_data has enough rows
-        while len(existing_data) < START_ROW_INDEX + max_height:
-            existing_data.append([''])
-        
         for i in range(len(existing_data)):
             while len(existing_data[i]) < START_COL:
                 existing_data[i].append("")
 
         for i in range(len(existing_data)):
             row = existing_data[i]
-            old_tail = row[START_COL:] if len(row) > START_COL else []
+            old_tail = row[START_COL:]
             gap = [""] * BLOCK_WIDTH
             row[START_COL:] = gap + old_tail
             
@@ -167,17 +109,13 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         existing_data[0][START_COL] = date_label
 
         for j in range(6):
-            if len(existing_data[1]) <= START_COL + j:
-                existing_data[1].extend([""] * (START_COL + j - len(existing_data[1]) + 1))
             existing_data[1][START_COL + j] = header_row[j]
 
         for r in range(max_height):
             for c in range(6):
-                row_idx = r + START_ROW_INDEX
-                col_idx = START_COL + c
-                while len(existing_data[row_idx]) <= col_idx:
-                    existing_data[row_idx].append("")
-                existing_data[row_idx][col_idx] = aligned_data_block[r][c]
+                while len(existing_data[r + START_ROW_INDEX]) < START_COL + c + 1:
+                    existing_data[r + START_ROW_INDEX].append("")
+                existing_data[r + START_ROW_INDEX][START_COL + c] = aligned_data_block[r][c]
 
         # --- 8. Write All Changes to the Google Sheet ---
         sheet.update(range_name="A1", values=existing_data, value_input_option='USER_ENTERED')
