@@ -50,8 +50,9 @@ def find_reference_block(sheet_headers, main_block_start, block_width):
     """
     expected_headers = ["T", "P", "S", "F", "I", "KI"]
     for i in range(main_block_start + block_width, len(sheet_headers) - len(expected_headers) + 1):
-        if sheet_headers[i:i+len(expected_headers)] == expected_headers:
-            return i
+        if sheet_headers[i] == "T":
+            if sheet_headers[i:i+len(expected_headers)] == expected_headers:
+                return i
     return None
 
 def apply_formatting(service, sheet_id, sheet_gid, target_col, has_reference_data, max_rows, reference_block_start=None):
