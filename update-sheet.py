@@ -44,6 +44,7 @@ def convert_cell(val):
 
 def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
     """Builds and executes all formatting requests for a data block."""
+    print("  -> Building formatting requests...")
     requests = []
     data_end_col = target_col + NUM_DATA_COLS
 
@@ -56,10 +57,23 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
     requests.append({"updateBorders": {"range": border_range, "innerHorizontal": BORDER, "innerVertical": BORDER}})
 
     # --- Conditional Formatting ---
-    # We create a set of rules for each column that are self-contained.
+    print(f"  -> LOG: Setting up conditional formatting. target_col={target_col}, BLOCK_WIDTH={BLOCK_WIDTH}, max_rows={max_rows}")
+    
     for i, col_header in enumerate(["T", "P", "S", "F", "I", "KI"]):
         current_col_idx = target_col + i
-        ref_col_idx = target_col + BLOCK_WIDTH + i
+        
+        # --- FIX: The reference column is in the previous block, to the LEFT. ---
+        ref_col_idx = target_col - BLOCK_WIDTH + i
+
+        print(f"\n    -> LOG: Formatting rules for header '{col_header}':")
+        print(f"       - Current data is in column: {col_to_a1(current_col_idx)} (index {current_col_idx})")
+
+        # --- SAFETY CHECK & LOGGING ---
+        if ref_col_idx < 1: # Column A (index 0) is for module names, so ref must be > 0
+            print(f"       - Reference column index is {ref_col_idx}. This is the first data block or invalid. Skipping comparison formatting.")
+            continue
+
+        print(f"       - Comparing against reference data in column: {col_to_a1(ref_col_idx)} (index {ref_col_idx})")
         
         rule_range = {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX, "endRowIndex": START_ROW_INDEX + max_rows, "startColumnIndex": current_col_idx, "endColumnIndex": current_col_idx + 1}
         
@@ -76,23 +90,25 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
         }
         green_cond, red_cond = conditions[col_header]
 
-        # Rule formulas
-        green_formula = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {green_cond.lstrip('=')})"
-        red_formula_comp = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {red_cond.lstrip('=')})"
+        green_formula = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {green_cond})"
+        red_formula_comp = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {red_cond})"
         red_formula_no_ref = f"=AND(NOT(ISBLANK({current_cell_a1})), ISBLANK({ref_cell_a1}))"
 
-        # Create rule requests. They are applied with priority based on their position in the list.
-        # The first rule in the list has the highest priority.
+        print(f"       - Green Rule (Pass): {green_formula}")
+        print(f"       - Red Rule (Fail/Comparison): {red_formula_comp}")
+        print(f"       - Red Rule (Fail/No Reference): {red_formula_no_ref}")
+
         requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": green_formula}]}, "format": {"textFormat": {"foregroundColor": COLORS["green"]}}}}, "index": 0}})
         requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula_comp}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 1}})
         requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula_no_ref}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 2}})
 
     if requests:
+        print("\n  -> LOG: Executing batch update for formatting.")
         service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
 
 def update_sheet(service, spreadsheet, sheet_name, csv_path):
     try:
-        print(f"--- Processing: {sheet_name} from {csv_path} ---")
+        print(f"\n--- Processing: {sheet_name} from {csv_path} ---")
         sheet = spreadsheet.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
         print(f"Worksheet '{sheet_name}' not found. Creating it.")
@@ -107,21 +123,21 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
                 first_block_rows.append(block_segment)
 
     if len(first_block_rows) < 2 or len(first_block_rows[0]) < NUM_DATA_COLS + 2:
-        print(f"⚠️ WARNING: First data block in CSV '{csv_path}' is incomplete. Skipping.")
+        print(f"⚠️ WARNING: First data block in CSV '{csv_path}' is incomplete or malformed. Skipping.")
         return
 
     date_label = first_block_rows[1][0].strip()
     csv_headers = [h.strip() for h in first_block_rows[0][2:2 + NUM_DATA_COLS]]
     csv_data_map = {row[1].strip(): [convert_cell(c) for c in row[2:2 + NUM_DATA_COLS]] for row in first_block_rows[1:] if len(row) > 1 and row[1].strip()}
+    print(f"  -> LOG: Found date '{date_label}' with {len(csv_data_map)} modules in CSV.")
 
     existing_data = sheet.get_all_values()
     master_module_list = [row[0] for row in existing_data[START_ROW_INDEX:] if row and row[0]] if len(existing_data) > START_ROW_INDEX else []
     
-    new_modules = [m for m in csv_data_map if m not in master_module_list]
+    new_modules = sorted([m for m in csv_data_map if m not in master_module_list])
     if new_modules:
-        print(f"  -> New modules found: {', '.join(new_modules)}")
+        print(f"  -> LOG: New modules found: {', '.join(new_modules)}. Appending to sheet.")
         new_rows = [[m] for m in new_modules]
-        # Use gspread to append rows, as it's simple and effective for this task.
         sheet.append_rows(values=new_rows, value_input_option='USER_ENTERED', table_range=f"A{len(master_module_list) + START_ROW_INDEX + 1}")
         master_module_list.extend(new_modules)
     
@@ -133,13 +149,12 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         target_col = sheet_headers.index(date_label)
 
     if target_col == -1:
-        print(f"  -> Date '{date_label}' not found. Inserting new columns.")
+        print(f"  -> LOG: Date '{date_label}' not in headers. Inserting new columns at index {START_COL}.")
         target_col = START_COL
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}]}).execute()
     else:
-        print(f"  -> Date '{date_label}' found. Updating columns in place.")
+        print(f"  -> LOG: Date '{date_label}' found in headers. Updating columns in place at index {target_col}.")
 
-    # Use a single batchUpdate to write all data efficiently.
     update_body = {
         "valueInputOption": "USER_ENTERED",
         "data": [
@@ -148,11 +163,15 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             {"range": f"{sheet.title}!{col_to_a1(target_col)}{START_ROW_INDEX + 1}", "values": aligned_data_block}
         ]
     }
+    print(f"  -> LOG: Writing data to sheet '{sheet.title}' starting at column {col_to_a1(target_col)}.")
     service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
     
-    print("  -> Applying formatting...")
-    # Clear any old rules on the target columns before applying new ones to prevent conflicts.
-    service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"deleteConditionalFormatRule": {"sheetId": sheet.id, "index": 0}} for _ in range(NUM_DATA_COLS * 3)]}).execute()
+    print("  -> LOG: Clearing old conditional formatting rules before applying new ones.")
+    # This approach of deleting is simple but can be slow. It's OK for a few rules.
+    # A more advanced approach would be to track and update rules by ID.
+    clear_requests = [{"deleteConditionalFormatRule": {"sheetId": sheet.id, "index": 0}} for _ in range(NUM_DATA_COLS * 3)]
+    service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": clear_requests}).execute()
+    
     apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, len(master_module_list))
     
     print(f"✅ Sheet '{sheet_name}' updated successfully.")
@@ -163,7 +182,6 @@ def main():
         creds = GoogleCredentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
         service = build("sheets", "v4", credentials=creds)
         
-        # Use gspread for simple operations like opening the sheet
         from oauth2client.service_account import ServiceAccountCredentials as GSpreadCredentials
         gspread_creds = GSpreadCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
         client = gspread.authorize(gspread_creds)
