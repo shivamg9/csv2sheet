@@ -92,34 +92,45 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, has_reference_dat
         rule_range = {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX, "startColumnIndex": current_col_idx, "endIndex": current_col_idx + 1}
         
         if not has_reference_data:
-            # If no reference data, all cells are red
-            rules.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=TRUE"}]}, "format": {"backgroundColor": COLORS["red"]}}}, "index": 0}})
+            # If no reference data, all non-blank cells are red
+            rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "NOT_BLANK"}, "format": {"backgroundColor": COLORS["red"]}}}
+            rules.append({"addConditionalFormatRule": {"rule": rule, "index": 0}})
         else:
             # Rules with reference comparison
             ref_col_a1 = col_to_a1(ref_col + i)
-            current_cell_a1_relative = f"{col_to_a1(current_col_idx)}{START_ROW_INDEX + 1}"
-            ref_cell_a1_relative = f"{ref_col_a1}{START_ROW_INDEX + 1}"
+            current_cell_a1 = f"{col_to_a1(current_col_idx)}{START_ROW_INDEX + 1}"
+            ref_cell_a1 = f"{ref_col_a1}{START_ROW_INDEX + 1}"
             
-            # Define Green and Red conditions based on column
+            # Base formula checks that neither cell is blank
+            base_formula_part = f"AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})))"
+            
             conditions = {
-                "T": (f"={current_cell_a1_relative}={ref_cell_a1_relative}", f"={current_cell_a1_relative}<>{ref_cell_a1_relative}"),
-                "P": (f"={current_cell_a1_relative}>={ref_cell_a1_relative}", f"={current_cell_a1_relative}<{ref_cell_a1_relative}"),
-                "S": (f"={current_cell_a1_relative}<={ref_cell_a1_relative}", f"={current_cell_a1_relative}>{ref_cell_a1_relative}"),
-                "F": (f"={current_cell_a1_relative}<={ref_cell_a1_relative}", f"={current_cell_a1_relative}>{ref_cell_a1_relative}"),
-                "I": (f"={current_cell_a1_relative}<={ref_cell_a1_relative}", f"={current_cell_a1_relative}>{ref_cell_a1_relative}"),
-                "KI": (f"={current_cell_a1_relative}<={ref_cell_a1_relative}", f"={current_cell_a1_relative}>{ref_cell_a1_relative}")
+                "T":  (f"{current_cell_a1}={ref_cell_a1}", f"{current_cell_a1}<>{ref_cell_a1}"),
+                "P":  (f"{current_cell_a1}>={ref_cell_a1}", f"{current_cell_a1}<{ref_cell_a1}"),
+                "S":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+                "F":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+                "I":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+                "KI": (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}")
             }
-            green_formula, red_formula = conditions[col_header]
+            green_condition, red_condition = conditions[col_header]
 
-            # Add rule for green and red, ensuring blank reference cells are ignored
-            base_check = f"AND(NOT(ISBLANK({ref_cell_a1_relative})), NOT(ISBLANK({current_cell_a1_relative})))"
-            rules.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": f"={base_check.replace(')', ',' + green_formula.replace('=', '', 1) + ')' )}" ]}, "format": {"backgroundColor": COLORS["green"]}}}, "index": 0}})
-            rules.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": f"={base_check.replace(')', ',' + red_formula.replace('=', '', 1) + ')' )}" ]}, "format": {"backgroundColor": COLORS["red"]}}}, "index": 0}})
+            # Create full formulas for Green and Red rules
+            green_full_formula = f"={base_formula_part[:-1]},{green_condition})"
+            red_full_formula = f"={base_formula_part[:-1]},{red_condition})"
 
-    requests.extend(rules)
-    
-    if requests:
-        service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
+            # Add rule for Green
+            green_rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": green_full_formula}]}, "format": {"backgroundColor": COLORS["green"]}}}
+            rules.append({"addConditionalFormatRule": {"rule": green_rule, "index": 0}})
+
+            # Add rule for Red
+            red_rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_full_formula}]}, "format": {"backgroundColor": COLORS["red"]}}}
+            rules.append({"addConditionalFormatRule": {"rule": red_rule, "index": 0}})
+
+    if rules:
+        requests.append({"addConditionalFormatRule": rule} for rule in rules)
+        # The API expects a list of requests, not a generator, so we convert it
+        service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": list(requests)}).execute()
+
 
 def update_sheet(service, spreadsheet, sheet_name, csv_path):
     try:
@@ -153,14 +164,17 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
 
     sheet_headers = existing_data[0] if existing_data else []
     try:
+        # Find column index by searching for the date label in the first row
         target_col = sheet_headers.index(date_label)
         print(f"  -> Date '{date_label}' found. Updating columns in place.")
+        # Check if there is data in the block to the right to act as a reference
         has_reference_data = len(sheet_headers) > target_col + BLOCK_WIDTH and sheet_headers[target_col + BLOCK_WIDTH]
     except ValueError:
         print(f"  -> Date '{date_label}' not found. Inserting new columns.")
         target_col = START_COL
-        # Insert new columns, which will shift existing data and formatting
+        # Insert new columns for the data block
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}]}).execute()
+        # Check if there was any data to the right of the insertion point
         has_reference_data = len(sheet_headers) > START_COL and sheet_headers[START_COL]
 
     # Write data to the sheet
@@ -168,7 +182,6 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     sheet.update(f"{col_to_a1(target_col)}{2}", [csv_headers])
     sheet.update(f"{col_to_a1(target_col)}{START_ROW_INDEX + 1}", aligned_data_block, value_input_option='USER_ENTERED')
     
-    # Apply all formatting
     print("  -> Applying formatting...")
     apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, has_reference_data, len(master_module_list))
     
@@ -176,7 +189,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
 
 def main():
     try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
         creds = GoogleCredentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
         service = build("sheets", "v4", credentials=creds)
         
@@ -188,7 +201,12 @@ def main():
             print(f"❌ ERROR: Source directory '{SOURCE_DIR}' not found.")
             return
 
-        for filename in sorted([f for f in os.listdir(SOURCE_DIR) if f.endswith(".csv")]):
+        csv_files = sorted([f for f in os.listdir(SOURCE_DIR) if f.endswith(".csv")])
+        if not csv_files:
+            print("No CSV files found in the 'source' directory. Nothing to do.")
+            return
+
+        for filename in csv_files:
             sheet_name = os.path.splitext(filename)[0]
             csv_path = os.path.join(SOURCE_DIR, filename)
             update_sheet(service, spreadsheet, sheet_name, csv_path)
