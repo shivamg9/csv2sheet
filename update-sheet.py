@@ -11,9 +11,9 @@ CREDENTIALS_FILE = "creds.json"
 
 # --- CONSTANTS ---
 START_ROW_INDEX = 2
-START_COL = 9
+START_COL = 9 # This is column J
 NUM_DATA_COLS = 6
-BLOCK_WIDTH = 9
+BLOCK_WIDTH = 9 # The number of columns each block spans (A-I, J-R etc.)
 
 # --- FORMATTING STYLES ---
 COLORS = {
@@ -62,15 +62,16 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
     for i, col_header in enumerate(["T", "P", "S", "F", "I", "KI"]):
         current_col_idx = target_col + i
         
-        # --- FIX: The reference column is in the previous block, to the LEFT. ---
-        ref_col_idx = target_col - BLOCK_WIDTH + i
+        # --- FIX: Correctly calculate the reference column index ---
+        # The reference block's data starts 1 column after the block's start (e.g., data is in B, block starts at A)
+        ref_col_idx = (target_col - BLOCK_WIDTH) + 1 + i
 
         print(f"\n    -> LOG: Formatting rules for header '{col_header}':")
         print(f"       - Current data is in column: {col_to_a1(current_col_idx)} (index {current_col_idx})")
 
-        # --- SAFETY CHECK & LOGGING ---
-        if ref_col_idx < 1: # Column A (index 0) is for module names, so ref must be > 0
-            print(f"       - Reference column index is {ref_col_idx}. This is the first data block or invalid. Skipping comparison formatting.")
+        # The first data block on the sheet will have no valid reference to its left
+        if ref_col_idx < 1: 
+            print(f"       - Reference column index ({ref_col_idx}) is invalid. Skipping comparison formatting for this column.")
             continue
 
         print(f"       - Comparing against reference data in column: {col_to_a1(ref_col_idx)} (index {ref_col_idx})")
@@ -167,11 +168,14 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
     
     print("  -> LOG: Clearing old conditional formatting rules before applying new ones.")
-    # This approach of deleting is simple but can be slow. It's OK for a few rules.
-    # A more advanced approach would be to track and update rules by ID.
+    # A more advanced approach would be to track and update rules by ID, but this is simple and effective.
     clear_requests = [{"deleteConditionalFormatRule": {"sheetId": sheet.id, "index": 0}} for _ in range(NUM_DATA_COLS * 3)]
-    service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": clear_requests}).execute()
-    
+    try:
+        service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": clear_requests}).execute()
+    except Exception as e:
+        print(f"  -> LOG: Could not clear all formatting rules (this is expected if the sheet is new): {e}")
+
+
     apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, len(master_module_list))
     
     print(f"✅ Sheet '{sheet_name}' updated successfully.")
