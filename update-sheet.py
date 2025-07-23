@@ -57,7 +57,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             print(f"⚠️ WARNING: CSV '{csv_path}' is incomplete or empty. Skipping.")
             return
 
-        header_row = [h.strip() for h in raw_rows[0][1:8]]
+        header_row = [h.strip() for h in raw_rows[0][2:8]]
         date_label = raw_rows[1][0].strip()
 
         csv_data_map = {}
@@ -66,7 +66,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
                 continue # Skip if module name is missing
 
             module_name = row[1].strip()
-            data_cells = row[1:8]
+            data_cells = row[2:8]
             row_data = [convert_cell(cell) for cell in data_cells]
             csv_data_map[module_name] = row_data
 
@@ -88,7 +88,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
                 existing_data.append([module_name])
 
         # --- 5. Align CSV Data to the Master Module Order ---
-        aligned_data_block = [csv_data_map.get(m, [''] * 7) for m in master_module_list]
+        aligned_data_block = [csv_data_map.get(m, [''] * 6) for m in master_module_list]
 
         # --- 6. Prepare Sheet for New Data Block ---
         max_height = len(aligned_data_block)
@@ -104,15 +104,15 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             row[START_COL:] = gap + old_tail
             
         # --- 7. Insert the Aligned Data into the Sheet Structure ---
-        if len(existing_data[0]) < START_COL + 7:
-            existing_data[0].extend([""] * (START_COL + 7 - len(existing_data[0]) + 2))
+        if len(existing_data[0]) < START_COL + 6:
+            existing_data[0].extend([""] * (START_COL + 6 - len(existing_data[0]) + 2))
         existing_data[0][START_COL] = date_label
 
-        for j in range(7):
+        for j in range(6):
             existing_data[1][START_COL + j] = header_row[j]
 
         for r in range(max_height):
-            for c in range(7):
+            for c in range(6):
                 while len(existing_data[r + START_ROW_INDEX]) < START_COL + c + 1:
                     existing_data[r + START_ROW_INDEX].append("")
                 existing_data[r + START_ROW_INDEX][START_COL + c] = aligned_data_block[r][c]
@@ -127,7 +127,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
                     "startRowIndex": 0,
                     "endRowIndex": 1,
                     "startColumnIndex": START_COL,
-                    "endColumnIndex": START_COL + 7
+                    "endColumnIndex": START_COL + 6
                 },
                 "mergeType": "MERGE_ALL"
             }
