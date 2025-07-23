@@ -151,6 +151,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     if target_col == -1:
         print(f"  -> LOG: Date '{date_label}' not in headers. Inserting new columns at index {START_COL}.")
         target_col = START_COL
+        # This API call inserts blank columns and shifts existing columns to the right, PRESERVING their formatting.
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}]}).execute()
     else:
         print(f"  -> LOG: Date '{date_label}' found in headers. Updating columns in place at index {target_col}.")
@@ -166,15 +167,8 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     print(f"  -> LOG: Writing data to sheet '{sheet.title}' starting at column {col_to_a1(target_col)}.")
     service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
     
-    print("  -> LOG: Clearing old conditional formatting rules before applying new ones.")
-    # A more advanced approach would be to track and update rules by ID, but this is simple and effective.
-    clear_requests = [{"deleteConditionalFormatRule": {"sheetId": sheet.id, "index": 0}} for _ in range(NUM_DATA_COLS * 3)]
-    try:
-        service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": clear_requests}).execute()
-    except Exception as e:
-        print(f"  -> LOG: Could not clear all formatting rules (this is expected if the sheet is new): {e}")
-
-
+    # Existing formatting on other columns (including those that were moved) will be untouched.
+    
     apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, len(master_module_list))
     
     print(f"✅ Sheet '{sheet_name}' updated successfully.")
