@@ -153,7 +153,8 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     
     aligned_data_block = [csv_data_map.get(m, [None] * NUM_DATA_COLS) for m in master_module_list]
 
-    sheet_headers = existing_data[1] if existing_data else []
+    # Use the second row for header detection (row index 1), not the first row
+    sheet_headers = existing_data[1] if len(existing_data) > 1 else []
     target_col = -1
     try:
         target_col = sheet_headers.index(date_label)
