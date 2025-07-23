@@ -62,7 +62,6 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
     for i, col_header in enumerate(["T", "P", "S", "F", "I", "KI"]):
         current_col_idx = target_col + i
         
-        # --- FIX: Correctly calculate the reference column index ---
         # The reference block's data starts 1 column after the block's start (e.g., data is in B, block starts at A)
         ref_col_idx = (target_col - BLOCK_WIDTH) + 1 + i
 
