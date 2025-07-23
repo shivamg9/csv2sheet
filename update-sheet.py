@@ -42,6 +42,56 @@ def convert_cell(val):
     except (ValueError, TypeError):
         return str(val).strip()
 
+def clear_formatting_for_range(service, sheet_id, sheet_gid, start_col, end_col):
+    """
+    Finds and deletes all conditional formatting rules that apply to the given column range.
+    This is critical for replacing rules without affecting the rest of the sheet.
+    """
+    print(f"  -> LOG: Checking for existing conditional format rules in columns {col_to_a1(start_col)}-{col_to_a1(end_col-1)} to clear them.")
+    
+    # We need to get the sheet's properties to find the rule IDs
+    spreadsheet_data = service.spreadsheets().get(spreadsheetId=sheet_id, fields='sheets(properties,conditionalFormats)').execute()
+    
+    target_sheet = next((s for s in spreadsheet_data['sheets'] if s['properties']['sheetId'] == sheet_gid), None)
+    if not target_sheet or 'conditionalFormats' not in target_sheet:
+        print("  -> LOG: No existing conditional formats found on this sheet. Nothing to clear.")
+        return
+
+    all_rules = target_sheet['conditionalFormats']
+    requests_to_delete = []
+
+    for rule in all_rules:
+        # Rules might not have an ID in some rare cases, so we check.
+        rule_id = rule.get('ruleId')
+        if not rule_id:
+            continue
+
+        for rule_range in rule['ranges']:
+            # Check for overlap between the rule's range and our target column range
+            if rule_range.get('sheetId', sheet_gid) == sheet_gid:
+                range_start = rule_range.get('startColumnIndex', 0)
+                range_end = rule_range.get('endColumnIndex', 1)
+                
+                # Standard overlap condition: max(start1, start2) < min(end1, end2)
+                if max(start_col, range_start) < min(end_col, range_end):
+                    requests_to_delete.append({
+                        "deleteConditionalFormatRule": {
+                            "sheetId": sheet_gid,
+                            "ruleId": rule_id
+                        }
+                    })
+                    # Once we've marked this rule for deletion, we don't need to check its other ranges
+                    break 
+    
+    if requests_to_delete:
+        print(f"  -> LOG: Found {len(requests_to_delete)} old formatting rules to remove.")
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={"requests": requests_to_delete}
+        ).execute()
+    else:
+        print("  -> LOG: No conflicting rules found in the target range.")
+
 def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
     """Builds and executes all formatting requests for a data block."""
     print("  -> Building formatting requests...")
@@ -57,26 +107,14 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
     requests.append({"updateBorders": {"range": border_range, "innerHorizontal": BORDER, "innerVertical": BORDER}})
 
     # --- Conditional Formatting ---
-    print(f"  -> LOG: Setting up conditional formatting. target_col={target_col}, BLOCK_WIDTH={BLOCK_WIDTH}, max_rows={max_rows}")
-    
     for i, col_header in enumerate(["T", "P", "S", "F", "I", "KI"]):
         current_col_idx = target_col + i
-        
-        # The reference block's data starts 1 column after the block's start (e.g., data is in B, block starts at A)
         ref_col_idx = (target_col - BLOCK_WIDTH) + 1 + i
 
-        print(f"\n    -> LOG: Formatting rules for header '{col_header}':")
-        print(f"       - Current data is in column: {col_to_a1(current_col_idx)} (index {current_col_idx})")
-
-        # The first data block on the sheet will have no valid reference to its left
         if ref_col_idx < 1: 
-            print(f"       - Reference column index ({ref_col_idx}) is invalid. Skipping comparison formatting for this column.")
             continue
 
-        print(f"       - Comparing against reference data in column: {col_to_a1(ref_col_idx)} (index {ref_col_idx})")
-        
         rule_range = {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX, "endRowIndex": START_ROW_INDEX + max_rows, "startColumnIndex": current_col_idx, "endColumnIndex": current_col_idx + 1}
-        
         current_cell_a1 = f"{col_to_a1(current_col_idx)}{START_ROW_INDEX + 1}"
         ref_cell_a1 = f"{col_to_a1(ref_col_idx)}{START_ROW_INDEX + 1}"
         
@@ -94,16 +132,12 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
         red_formula_comp = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {red_cond})"
         red_formula_no_ref = f"=AND(NOT(ISBLANK({current_cell_a1})), ISBLANK({ref_cell_a1}))"
 
-        print(f"       - Green Rule (Pass): {green_formula}")
-        print(f"       - Red Rule (Fail/Comparison): {red_formula_comp}")
-        print(f"       - Red Rule (Fail/No Reference): {red_formula_no_ref}")
-
         requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": green_formula}]}, "format": {"textFormat": {"foregroundColor": COLORS["green"]}}}}, "index": 0}})
         requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula_comp}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 1}})
         requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula_no_ref}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 2}})
 
     if requests:
-        print("\n  -> LOG: Executing batch update for formatting.")
+        print("\n  -> LOG: Executing batch update to apply new formatting.")
         service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
 
 def update_sheet(service, spreadsheet, sheet_name, csv_path):
@@ -129,8 +163,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     date_label = first_block_rows[1][0].strip()
     csv_headers = [h.strip() for h in first_block_rows[0][2:2 + NUM_DATA_COLS]]
     csv_data_map = {row[1].strip(): [convert_cell(c) for c in row[2:2 + NUM_DATA_COLS]] for row in first_block_rows[1:] if len(row) > 1 and row[1].strip()}
-    print(f"  -> LOG: Found date '{date_label}' with {len(csv_data_map)} modules in CSV.")
-
+    
     existing_data = sheet.get_all_values()
     master_module_list = [row[0] for row in existing_data[START_ROW_INDEX:] if row and row[0]] if len(existing_data) > START_ROW_INDEX else []
     
@@ -151,10 +184,12 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     if target_col == -1:
         print(f"  -> LOG: Date '{date_label}' not in headers. Inserting new columns at index {START_COL}.")
         target_col = START_COL
-        # This API call inserts blank columns and shifts existing columns to the right, PRESERVING their formatting.
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}]}).execute()
     else:
         print(f"  -> LOG: Date '{date_label}' found in headers. Updating columns in place at index {target_col}.")
+
+    # Surgically clear formatting ONLY for the target columns before writing to them.
+    clear_formatting_for_range(service, SPREADSHEET_ID, sheet.id, target_col, target_col + NUM_DATA_COLS)
 
     update_body = {
         "valueInputOption": "USER_ENTERED",
@@ -166,8 +201,6 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     }
     print(f"  -> LOG: Writing data to sheet '{sheet.title}' starting at column {col_to_a1(target_col)}.")
     service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
-    
-    # Existing formatting on other columns (including those that were moved) will be untouched.
     
     apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, len(master_module_list))
     
