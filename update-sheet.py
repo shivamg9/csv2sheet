@@ -43,14 +43,26 @@ def convert_cell(val):
     except (ValueError, TypeError):
         return str(val).strip()
 
-def apply_formatting(service, sheet_id, sheet_gid, target_col, has_reference_data, max_rows):
+def find_reference_block(sheet_headers, main_block_start, block_width):
+    """
+    Looks for a second block of T,P,S,F,I,KI headers after the main block.
+    Returns the starting column index of the reference block, or None if not found.
+    """
+    expected_headers = ["T", "P", "S", "F", "I", "KI"]
+    for i in range(main_block_start + block_width, len(sheet_headers) - len(expected_headers) + 1):
+        if sheet_headers[i:i+len(expected_headers)] == expected_headers:
+            return i
+    return None
+
+def apply_formatting(service, sheet_id, sheet_gid, target_col, has_reference_data, max_rows, reference_block_start=None):
     """
     Builds and executes all formatting requests for a data block.
-    Adds debug print statements to trace conditional formatting logic.
+    Uses the actual reference block start if available.
     """
-    print(f"[DEBUG] apply_formatting: target_col={target_col}, has_reference_data={has_reference_data}, max_rows={max_rows}")
+    print(f"[DEBUG] apply_formatting: target_col={target_col}, has_reference_data={has_reference_data}, max_rows={max_rows}, reference_block_start={reference_block_start}")
     requests = []
-    ref_col = target_col + BLOCK_WIDTH
+    # Use the detected reference block start if available
+    ref_col = reference_block_start if reference_block_start is not None else (target_col + BLOCK_WIDTH)
     data_end_col = target_col + NUM_DATA_COLS
 
     # Set column width and merge header cells
@@ -148,25 +160,25 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     except ValueError:
         pass # Not found, target_col remains -1
     
-    # Debug: Print sheet headers and check for reference data
     print(f"[DEBUG] Sheet headers: {sheet_headers}")
+    reference_block_start = None
     if target_col != -1:
         print(f"  -> Date '{date_label}' found. Updating columns in place at col {target_col}.")
-        # *** FIX #2 (Update Case): Correctly check for reference data ***
-        if len(sheet_headers) > target_col + BLOCK_WIDTH:
-            print(f"[DEBUG] Reference header at {target_col + BLOCK_WIDTH}: {sheet_headers[target_col + BLOCK_WIDTH]}")
+        reference_block_start = find_reference_block(sheet_headers, target_col, BLOCK_WIDTH)
+        has_reference_data = reference_block_start is not None
+        if has_reference_data:
+            print(f"[DEBUG] Reference block found at column {reference_block_start}")
         else:
-            print(f"[DEBUG] No reference header found at {target_col + BLOCK_WIDTH}.")
-        has_reference_data = len(sheet_headers) > target_col + BLOCK_WIDTH and sheet_headers[target_col + BLOCK_WIDTH]
+            print(f"[DEBUG] No reference block found after main block.")
     else:
         print(f"  -> Date '{date_label}' not found. Inserting new columns at {START_COL}.")
         target_col = START_COL
-        # *** FIX #2 (Insert Case): Check for reference data BEFORE inserting ***
-        if len(sheet_headers) > START_COL:
-            print(f"[DEBUG] Reference header at {START_COL}: {sheet_headers[START_COL]}")
+        reference_block_start = find_reference_block(sheet_headers, target_col, BLOCK_WIDTH)
+        has_reference_data = reference_block_start is not None
+        if has_reference_data:
+            print(f"[DEBUG] Reference block found at column {reference_block_start}")
         else:
-            print(f"[DEBUG] No reference header found at {START_COL}.")
-        has_reference_data = len(sheet_headers) > START_COL and sheet_headers[START_COL]
+            print(f"[DEBUG] No reference block found after main block.")
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}]}).execute()
 
     print(f"[DEBUG] has_reference_data: {has_reference_data}")
@@ -175,7 +187,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     sheet.update(range_name=f"{col_to_a1(target_col)}{START_ROW_INDEX + 1}", values=aligned_data_block, value_input_option='USER_ENTERED')
     
     print(f"  -> Applying formatting (Reference found: {has_reference_data})...")
-    apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, has_reference_data, len(master_module_list))
+    apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, has_reference_data, len(master_module_list), reference_block_start=reference_block_start)
     
     print(f"✅ Sheet '{sheet_name}' updated successfully.")
 
