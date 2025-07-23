@@ -79,7 +79,8 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, has_reference_dat
     cond_format_rules = []
     for i, col_header in enumerate(["T", "P", "S", "F", "I", "KI"]):
         current_col_idx = target_col + i
-        rule_range = {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX, "startColumnIndex": current_col_idx, "endIndex": current_col_idx + 1}
+        # *** FIX IS HERE: Changed "endIndex" to "endColumnIndex" ***
+        rule_range = {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX, "startColumnIndex": current_col_idx, "endColumnIndex": current_col_idx + 1}
         
         if not has_reference_data:
             rule = {"ranges": [rule_range], "booleanRule": {"condition": {"type": "NOT_BLANK"}, "format": {"backgroundColor": COLORS["red"]}}}
