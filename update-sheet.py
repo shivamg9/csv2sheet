@@ -4,7 +4,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials as GoogleCredentials
 import os
-import csv # Using the built-in CSV module
+import csv
 
 # --- CONFIGURATION ---
 SOURCE_DIR = "source"
@@ -33,8 +33,9 @@ def convert_cell(val):
 
 def update_sheet(service, spreadsheet, sheet_name, csv_path):
     """
-    Reads data from a given CSV file, maps it to Column A modules, and inserts it
-    as a new block into the specified worksheet.
+    Reads data from a given CSV file, maps it to Column A modules.
+    If the date exists, it updates the corresponding columns.
+    If the date doesn't exist, it inserts a new block for that date.
     """
     try:
         print(f"--- Processing: {sheet_name} from {csv_path} ---")
@@ -50,7 +51,6 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         raw_rows = []
         with open(csv_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            # Filter out any completely empty rows
             raw_rows = [row for row in reader if any(cell.strip() for cell in row)]
 
         if len(raw_rows) < 2 or len(raw_rows[0]) < 8:
@@ -61,10 +61,9 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         date_label = raw_rows[1][0].strip()
 
         csv_data_map = {}
-        for row in raw_rows[1:]: # Start from first data row
+        for row in raw_rows[1:]:
             if len(row) < 2 or not row[1].strip():
-                continue # Skip if module name is missing
-
+                continue
             module_name = row[1].strip()
             data_cells = row[2:8]
             row_data = [convert_cell(cell) for cell in data_cells]
@@ -85,37 +84,60 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             print(f"  -> New modules found and added: {', '.join(new_modules_in_this_run)}")
             for module_name in new_modules_in_this_run:
                 master_module_list.append(module_name)
-                existing_data.append([module_name])
+                # Ensure the existing_data list is long enough before appending
+                while len(existing_data) < START_ROW_INDEX + len(master_module_list):
+                    existing_data.append([])
+                existing_data[START_ROW_INDEX + master_module_list.index(module_name)].insert(0, module_name)
+
 
         # --- 5. Align CSV Data to the Master Module Order ---
         aligned_data_block = [csv_data_map.get(m, [''] * 6) for m in master_module_list]
 
         # --- 6. Prepare Sheet for New Data Block ---
+        sheet_headers = existing_data[0] if len(existing_data) > 0 else []
+        target_col = -1
+
+        # Search for the date in the headers to determine if we are updating or inserting
+        for i, header_val in enumerate(sheet_headers):
+            if header_val.strip() == date_label:
+                target_col = i
+                break
+
+        if target_col != -1:
+            print(f"  -> Date '{date_label}' found. Updating data in place.")
+        else:
+            print(f"  -> Date '{date_label}' not found. Inserting new columns.")
+            target_col = START_COL
+            # Shift existing data to make space for the new block
+            for i in range(len(existing_data)):
+                while len(existing_data[i]) < START_COL:
+                    existing_data[i].append("")
+                row = existing_data[i]
+                old_tail = row[START_COL:]
+                gap = [""] * BLOCK_WIDTH
+                row[START_COL:] = gap + old_tail
+
+        # --- 7. Insert or Update the Aligned Data into the Sheet Structure ---
         max_height = len(aligned_data_block)
-        
-        for i in range(len(existing_data)):
-            while len(existing_data[i]) < START_COL:
-                existing_data[i].append("")
 
-        for i in range(len(existing_data)):
-            row = existing_data[i]
-            old_tail = row[START_COL:]
-            gap = [""] * BLOCK_WIDTH
-            row[START_COL:] = gap + old_tail
-            
-        # --- 7. Insert the Aligned Data into the Sheet Structure ---
-        if len(existing_data[0]) < START_COL + 6:
-            existing_data[0].extend([""] * (START_COL + 6 - len(existing_data[0]) + 2))
-        existing_data[0][START_COL] = date_label
+        # Ensure header rows are long enough
+        while len(existing_data) < START_ROW_INDEX:
+            existing_data.append([])
+        while len(existing_data[0]) < target_col + BLOCK_WIDTH:
+            existing_data[0].append("")
+        while len(existing_data[1]) < target_col + len(header_row):
+            existing_data[1].append("")
 
-        for j in range(6):
-            existing_data[1][START_COL + j] = header_row[j]
+        existing_data[0][target_col] = date_label
+        for j in range(len(header_row)):
+            existing_data[1][target_col + j] = header_row[j]
 
         for r in range(max_height):
-            for c in range(6):
-                while len(existing_data[r + START_ROW_INDEX]) < START_COL + c + 1:
-                    existing_data[r + START_ROW_INDEX].append("")
-                existing_data[r + START_ROW_INDEX][START_COL + c] = aligned_data_block[r][c]
+            sheet_row_index = START_ROW_INDEX + r
+            for c in range(len(header_row)):
+                while len(existing_data[sheet_row_index]) < target_col + c + 1:
+                    existing_data[sheet_row_index].append("")
+                existing_data[sheet_row_index][target_col + c] = aligned_data_block[r][c]
 
         # --- 8. Write All Changes to the Google Sheet ---
         sheet.update(range_name="A1", values=existing_data, value_input_option='USER_ENTERED')
@@ -125,10 +147,8 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
                 "unmergeCells": {
                     "range": {
                         "sheetId": sheet._properties["sheetId"],
-                        "startRowIndex": 0,
-                        "endRowIndex": 1,
-                        "startColumnIndex": START_COL,
-                        "endColumnIndex": START_COL + BLOCK_WIDTH
+                        "startRowIndex": 0, "endRowIndex": 1,
+                        "startColumnIndex": target_col, "endColumnIndex": target_col + BLOCK_WIDTH
                     }
                 }
             },
@@ -136,19 +156,16 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
                 "mergeCells": {
                     "range": {
                         "sheetId": sheet._properties["sheetId"],
-                        "startRowIndex": 0,
-                        "endRowIndex": 1,
-                        "startColumnIndex": START_COL,
-                        "endColumnIndex": START_COL + 6 # 6 columns for the new data block
+                        "startRowIndex": 0, "endRowIndex": 1,
+                        "startColumnIndex": target_col, "endColumnIndex": target_col + 6
                     },
                     "mergeType": "MERGE_ALL"
                 }
             }
         ]
-
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
 
-        print(f"✅ Sheet '{sheet_name}' updated successfully. New block mapped and inserted at column {chr(START_COL + 65)}.")
+        print(f"✅ Sheet '{sheet_name}' updated successfully. Block processed at column {chr(target_col + 65)}.")
 
     except Exception as e:
         print(f"❌ ERROR processing sheet '{sheet_name}': {e}")
