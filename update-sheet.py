@@ -45,7 +45,6 @@ def convert_cell(val):
 def clear_formatting_for_range(service, sheet_id, sheet_gid, start_col, end_col):
     """
     Finds and deletes all conditional formatting rules that apply ONLY to the given column range.
-    This is used to prevent duplicate rules when overwriting data for an existing date.
     """
     print(f"  -> LOG: Checking for existing conditional format rules in columns {col_to_a1(start_col)}-{col_to_a1(end_col-1)} to clear them.")
     
@@ -87,7 +86,7 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
 
     # Standard Formatting
     requests.append({"updateDimensionProperties": {"range": {"sheetId": sheet_gid, "dimension": "COLUMNS", "startIndex": target_col, "endIndex": data_end_col}, "properties": {"pixelSize": 80}, "fields": "pixelSize"}})
-    requests.append({"mergeCells": {"range": {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "mergeType": "MERGE_ALL"}})
+    requests.append({"mergeCells": {"range": {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": target_col, "endIndex": data_end_col}, "mergeType": "MERGE_ALL"}})
     requests.append({"repeatCell": {"range": {"sheetId": sheet_gid, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": target_col, "endIndex": data_end_col}, "cell": {"userEnteredFormat": {"backgroundColor": COLORS["light_grey_fill"], "textFormat": {"bold": True}}}, "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
     border_range = {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": START_ROW_INDEX + max_rows, "startColumnIndex": target_col, "endIndex": data_end_col}
     requests.append({"updateBorders": {"range": border_range, "top": BORDER, "bottom": BORDER, "left": BORDER, "right": BORDER}})
@@ -152,23 +151,25 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         # SCENARIO 1: DATE EXISTS. We will overwrite it.
         target_col = sheet_headers.index(date_label)
         print(f"  -> LOG: Date '{date_label}' found. Will overwrite at column {col_to_a1(target_col)}.")
-        # Clean the target area BEFORE writing new data to avoid rule conflicts.
         clear_formatting_for_range(service, SPREADSHEET_ID, sheet.id, target_col, target_col + NUM_DATA_COLS)
     else:
         # SCENARIO 2: NEW DATE. We will insert columns.
         target_col = START_COL
         print(f"  -> LOG: New date '{date_label}'. Inserting columns at {col_to_a1(target_col)}.")
-        # This command shifts everything from J onwards to the right, PRESERVING formatting.
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}]}).execute()
-        # We DO NOT clear formatting for the shifted columns.
     
-    # This part now runs for BOTH scenarios. It writes data into the determined target_col.
-    update_body = { "valueInputoption": "USER_ENTERED", "data": [ {"range": f"{sheet.title}!{col_to_a1(target_col)}1", "values": [[date_label]]}, {"range": f"{sheet.title}!{col_to_a1(target_col)}2", "values": [csv_headers]}, {"range": f"{sheet.title}!{col_to_a1(target_col)}{START_ROW_INDEX + 1}", "values": aligned_data_block}]}
+    # --- TYPO FIX IS HERE ---
+    update_body = {
+        "valueInputOption": "USER_ENTERED", 
+        "data": [
+            {"range": f"{sheet.title}!{col_to_a1(target_col)}1", "values": [[date_label]]},
+            {"range": f"{sheet.title}!{col_to_a1(target_col)}2", "values": [csv_headers]},
+            {"range": f"{sheet.title}!{col_to_a1(target_col)}{START_ROW_INDEX + 1}", "values": aligned_data_block}
+        ]
+    }
     print(f"  -> LOG: Writing data to column {col_to_a1(target_col)}.")
     service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
 
-    # This will apply fresh formatting to the data we just wrote at target_col.
-    # It will NOT touch the shifted columns.
     apply_formatting(service, SPREADSHEET_ID, sheet.id, target_col, len(master_module_list))
     
     print(f"✅ Sheet '{sheet_name}' updated successfully.")
@@ -181,6 +182,9 @@ def main():
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
         csv_files = sorted([f for f in os.listdir(SOURCE_DIR) if f.endswith(".csv")])
+        if not csv_files:
+            print("No CSV files found in 'source' directory. Nothing to do.")
+            return
         for filename in csv_files:
             update_sheet(service, spreadsheet, os.path.splitext(filename)[0], os.path.join(SOURCE_DIR, filename))
     except FileNotFoundError: print(f"❌ CRITICAL ERROR: Credentials file '{CREDENTIALS_FILE}' not found.")
