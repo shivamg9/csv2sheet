@@ -11,9 +11,8 @@ CREDENTIALS_FILE = "creds.json"
 
 # --- CONSTANTS ---
 START_ROW_INDEX = 2
-START_COL = 9
 NUM_DATA_COLS = 6
-BLOCK_WIDTH = 9
+BLOCK_WIDTH = 9 # The number of columns per date block, including spacing
 
 # --- FORMATTING STYLES ---
 COLORS = {
@@ -44,15 +43,15 @@ def convert_cell(val):
 
 def update_sheet(service, spreadsheet, sheet_name, csv_path):
     """
-    Reads data from a given CSV file, maps it, inserts or updates it in the sheet,
-    and applies direct font coloring based on comparison logic.
+    Finds the next empty block, writes new data, and applies direct font coloring
+    by comparing to the block on the LEFT.
     """
     try:
         print(f"--- Processing: {sheet_name} from {csv_path} ---")
         sheet = spreadsheet.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
         print(f"Worksheet '{sheet_name}' not found. Creating it.")
-        sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="50")
+        sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="100")
 
     # --- 1. Parse ONLY the first data block from the CSV ---
     first_block_rows = []
@@ -71,50 +70,46 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     csv_headers = [h.strip() for h in first_block_rows[0][2:2 + NUM_DATA_COLS]]
     csv_data_map = {row[1].strip(): [convert_cell(c) for c in row[2:2 + NUM_DATA_COLS]] for row in first_block_rows[1:] if len(row) > 1 and row[1].strip()}
 
-    # --- 2. Determine Target Column and Get Existing Sheet Data ---
+    # --- 2. Get Existing Sheet Data and Find Target/Reference Columns ---
     existing_data = sheet.get_all_values()
     sheet_headers = existing_data[0] if existing_data else []
-    
-    target_col = -1
+
     if date_label in sheet_headers:
-        target_col = sheet_headers.index(date_label)
+        print(f"  -> Date '{date_label}' already exists in the sheet. Skipping.")
+        return
 
-    # --- 3. Capture Reference Data BEFORE Making Changes ---
+    # Find the first empty column after column A to place the new data
+    target_col = 1 # Start checking from column B
+    while target_col < len(sheet_headers) and sheet_headers[target_col]:
+        target_col += 1
+    
+    print(f"  -> Found empty space. New data will be written starting at column {col_to_a1(target_col)}.")
+
+    # The reference column is to the LEFT of the target column
+    ref_col_start = target_col - BLOCK_WIDTH if target_col >= BLOCK_WIDTH else -1
+    
+    # --- 3. Capture Reference Data from the LEFT block ---
     reference_data_map = {}
-    ref_col_start = -1
-    if target_col != -1: # Updating in place
-        ref_col_start = target_col + BLOCK_WIDTH
-    else: # Inserting new
-        ref_col_start = START_COL
-
-    if len(existing_data) > START_ROW_INDEX and len(sheet_headers) > ref_col_start:
-        print(f"  -> Found reference data starting at column {col_to_a1(ref_col_start)}.")
+    if ref_col_start >= 0:
+        print(f"  -> Found reference data to the left, starting at column {col_to_a1(ref_col_start)}.")
         for r_idx, row in enumerate(existing_data[START_ROW_INDEX:]):
             module_name = row[0]
             if module_name:
                 ref_values = (row[ref_col_start : ref_col_start + NUM_DATA_COLS] + [''] * NUM_DATA_COLS)[:NUM_DATA_COLS]
                 reference_data_map[module_name] = [convert_cell(v) for v in ref_values]
 
-    # --- 4. Insert or Identify Columns for the New Data ---
-    if target_col == -1:
-        print(f"  -> Date '{date_label}' not found. Inserting new columns.")
-        target_col = START_COL
-        service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}]}).execute()
-    else:
-        print(f"  -> Date '{date_label}' found. Updating columns in place.")
-
-    # --- 5. Align Data and Prepare for Update ---
+    # --- 4. Align Data and Prepare for Update ---
     master_module_list = [row[0] for row in existing_data[START_ROW_INDEX:] if row and row[0]] if len(existing_data) > START_ROW_INDEX else []
     new_modules = [m for m in csv_data_map if m not in master_module_list]
     if new_modules:
         print(f"  -> New modules found: {', '.join(new_modules)}")
-        new_rows_data = [[m] + [None]*NUM_DATA_COLS for m in new_modules]
+        new_rows_data = [[m] for m in new_modules]
         sheet.append_rows(values=new_rows_data, value_input_option='USER_ENTERED', table_range="A1")
         master_module_list.extend(new_modules)
         
-    aligned_data_block = [csv_data_map.get(m, [None] * NUM_DATA_COLS) for m in master_module_list]
+    aligned_data_block = [csv_data_map.get(m, [''] * NUM_DATA_COLS) for m in master_module_list]
 
-    # --- 6. Write Data to Sheet ---
+    # --- 5. Write Data to Sheet ---
     update_body = {
         "valueInputOption": "USER_ENTERED",
         "data": [
@@ -125,11 +120,10 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     }
     service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
 
-    # --- 7. Apply Direct Formatting and Borders ---
-    print("  -> Applying direct formatting...")
+    # --- 6. Apply Direct Formatting and Borders ---
+    print("  -> Applying direct formatting based on comparison...")
     requests = []
     
-    # Define comparison logic
     comparison_logic = {
         "T": lambda n, r: n == r,
         "P": lambda n, r: n >= r,
@@ -147,11 +141,11 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             color_to_apply = None
             new_val = new_row[c_idx]
 
-            if ref_row:
+            if ref_row: # If a reference row exists for this module
                 ref_val = ref_row[c_idx]
                 try:
                     if not isinstance(new_val, (int, float)) or not isinstance(ref_val, (int, float)):
-                        raise TypeError() # Not a number, don't color
+                        raise TypeError()
                     
                     if comparison_logic[header](new_val, ref_val):
                         color_to_apply = COLORS["green"]
@@ -199,10 +193,7 @@ def main():
         client = gspread.authorize(gspread_creds)
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
 
-        if not os.path.isdir(SOURCE_DIR):
-            print(f"❌ ERROR: Source directory '{SOURCE_DIR}' not found.")
-            return
-
+        # Process files in a sorted order
         csv_files = sorted([f for f in os.listdir(SOURCE_DIR) if f.endswith(".csv")])
         for filename in csv_files:
             sheet_name = os.path.splitext(filename)[0]
