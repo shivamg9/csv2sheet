@@ -120,18 +120,31 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         # --- 8. Write All Changes to the Google Sheet ---
         sheet.update(range_name="A1", values=existing_data, value_input_option='USER_ENTERED')
 
-        requests = [{
-            "mergeCells": {
-                "range": {
-                    "sheetId": sheet._properties["sheetId"],
-                    "startRowIndex": 0,
-                    "endRowIndex": 1,
-                    "startColumnIndex": START_COL,
-                    "endColumnIndex": START_COL + 6
-                },
-                "mergeType": "MERGE_ALL"
+        requests = [
+            {
+                "unmergeCells": {
+                    "range": {
+                        "sheetId": sheet._properties["sheetId"],
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": START_COL,
+                        "endColumnIndex": START_COL + BLOCK_WIDTH
+                    }
+                }
+            },
+            {
+                "mergeCells": {
+                    "range": {
+                        "sheetId": sheet._properties["sheetId"],
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": START_COL,
+                        "endColumnIndex": START_COL + 6 # 6 columns for the new data block
+                    },
+                    "mergeType": "MERGE_ALL"
+                }
             }
-        }]
+        ]
 
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
 
