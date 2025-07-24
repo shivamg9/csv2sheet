@@ -109,7 +109,7 @@ def apply_new_conditional_formatting(service, sheet_id, sheet_gid, target_col, m
     data_end_col = target_col + NUM_DATA_COLS
 
     # Standard Formatting
-    requests.append({"updateDimensionProperties": {"range": {"sheetId": sheet_gid, "dimension": "COLUMNS", "startIndex": target_col, "endIndex": data_end_col}, "properties": {"pixelSize": 80}, "fields": "pixelSize"}})
+    requests.append({"updateDimensionProperties": {"range": {"sheetId": sheet_gid, "dimension": "COLUMNS", "startIndex": target_col, "endIndex": data_end_col}, "properties": {"pixelSize": 50}, "fields": "pixelSize"}})
     requests.append({"mergeCells": {"range": {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "mergeType": "MERGE_ALL"}})
     
     # --- FIX IS HERE ---
