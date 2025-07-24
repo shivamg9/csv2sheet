@@ -51,23 +51,22 @@ def bake_in_and_remove_formatting(service, sheet_id, sheet_gid, target_col, max_
     print(f"  -> Baking in formats for block starting at column {col_to_a1(target_col)}...")
     requests = []
     
-    # Define the range of the block to be "baked"
     data_end_col = target_col + NUM_DATA_COLS
     bake_range_a1 = f'{col_to_a1(target_col)}{START_ROW_INDEX + 1}:{col_to_a1(data_end_col - 1)}{START_ROW_INDEX + max_rows}'
 
-    # Get spreadsheet data including effective formats and conditional format rules
     try:
+        # Fetch only the necessary fields to be more efficient
         sheet_data = service.spreadsheets().get(
             spreadsheetId=sheet_id,
             ranges=[bake_range_a1],
-            fields='sheets(data(rowData(values(effectiveFormat))),conditionalFormats)'
+            fields='sheets(data(rowData(values(effectiveFormat))),conditionalFormats(ruleId,ranges))'
         ).execute()
     except Exception as e:
         print(f"  -> WARNING: Could not retrieve sheet data for baking. Skipping. Error: {e}")
         return
 
-    sheet_info = sheet_data.get('sheets', [])[0]
-    rows_data = sheet_info.get('data', [])[0].get('rowData', [])
+    sheet_info = sheet_data.get('sheets', [{}])[0]
+    rows_data = sheet_info.get('data', [{}])[0].get('rowData', [])
     rules_to_delete = set()
 
     # 1. Build requests to apply direct formatting based on effective format
@@ -75,18 +74,16 @@ def bake_in_and_remove_formatting(service, sheet_id, sheet_gid, target_col, max_
         cells = row.get('values', [])
         for c_idx, cell in enumerate(cells):
             effective_format = cell.get('effectiveFormat', {})
-            if 'foregroundColor' in effective_format.get('textFormat', {}):
+            if 'textFormat' in effective_format and 'foregroundColor' in effective_format['textFormat']:
                 color = effective_format['textFormat']['foregroundColor']
-                # Check if the color is one of our red/green conditional colors
-                if (color == COLORS["red"] or color == COLORS["green"]):
+                # Check against our specific conditional colors to avoid baking other formats
+                if color in [COLORS["red"], COLORS["green"]]:
                     requests.append({
                         "updateCell": {
                             "range": {
                                 "sheetId": sheet_gid,
-                                "startRowIndex": START_ROW_INDEX + r_idx,
-                                "endRowIndex": START_ROW_INDEX + r_idx + 1,
-                                "startColumnIndex": target_col + c_idx,
-                                "endColumnIndex": target_col + c_idx + 1,
+                                "startRowIndex": START_ROW_INDEX + r_idx, "endRowIndex": START_ROW_INDEX + r_idx + 1,
+                                "startColumnIndex": target_col + c_idx, "endColumnIndex": target_col + c_idx + 1,
                             },
                             "rows": [{"values": [{"userEnteredFormat": {"textFormat": {"foregroundColor": color}}}]}],
                             "fields": "userEnteredFormat.textFormat.foregroundColor"
@@ -96,14 +93,15 @@ def bake_in_and_remove_formatting(service, sheet_id, sheet_gid, target_col, max_
     # 2. Find and build requests to delete the old conditional formatting rules
     all_rules = sheet_info.get('conditionalFormats', [])
     for rule in all_rules:
+        rule_id = rule.get('ruleId')
         for r in rule.get('ranges', []):
-            if r['startColumnIndex'] >= target_col and r['endColumnIndex'] <= data_end_col:
-                rules_to_delete.add(rule['ruleId'])
+            if r.get('startColumnIndex') == target_col and r.get('endColumnIndex') == data_end_col:
+                rules_to_delete.add(rule_id)
 
     for rule_id in rules_to_delete:
-        requests.append({"deleteConditionalFormatRule": {"sheetId": sheet_gid, "ruleId": rule_id}})
+        requests.append({"deleteConditionalFormatRule": {"sheetId": sheet_gid, "index": 0, "ruleId": rule_id}})
 
-    # 3. Execute all requests in a single batch
+
     if requests:
         print(f"  -> LOG: Found {len(requests) - len(rules_to_delete)} cells to format and {len(rules_to_delete)} rules to delete. Executing batch update.")
         try:
@@ -131,18 +129,31 @@ def apply_new_conditional_formatting(service, sheet_id, sheet_gid, target_col, m
     # Conditional Formatting
     for i, col_header in enumerate(["T", "P", "S", "F", "I", "KI"]):
         current_col_idx = target_col + i
-        ref_col_idx = 1 + i # Reference block's data starts in column B (index 1)
+        ref_col_idx = 1 + i 
         
         rule_range = {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX, "endRowIndex": START_ROW_INDEX + max_rows, "startColumnIndex": current_col_idx, "endColumnIndex": current_col_idx + 1}
         current_cell_a1 = f"{col_to_a1(current_col_idx)}{START_ROW_INDEX + 1}"
         ref_cell_a1 = f"{col_to_a1(ref_col_idx)}{START_ROW_INDEX + 1}"
         
-        conditions = { "T": (f"={current_cell_a1}={ref_cell_a1}", f"={current_cell_a1}<>{ref_cell_a1}"), "P": (f"={current_cell_a1}>={ref_cell_a1}", f"={current_cell_a1}<{ref_cell_a1}"), "S": (f"={current_cell_a1}<={ref_cell_a1}", f"={current_cell_a1}>{ref_cell_a1}"), "F": (f"={current_cell_a1}<={ref_cell_a1}", f"={current_cell_a1}>{ref_cell_a1}"), "I": (f"={current_cell_a1}<={ref_cell_a1}", f"={current_cell_a1}>{ref_cell_a1}"), "KI": (f"={current_cell_a1}<={ref_cell_a1}", f"={current_cell_a1}>{ref_cell_a1}") }
+        # --- FIX IS HERE ---
+        # Removed the leading "=" from the condition strings. The outer formula provides it.
+        conditions = {
+            "T":  (f"{current_cell_a1}={ref_cell_a1}", f"{current_cell_a1}<>{ref_cell_a1}"),
+            "P":  (f"{current_cell_a1}>={ref_cell_a1}", f"{current_cell_a1}<{ref_cell_a1}"),
+            "S":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+            "F":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+            "I":  (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}"),
+            "KI": (f"{current_cell_a1}<={ref_cell_a1}", f"{current_cell_a1}>{ref_cell_a1}")
+        }
         green_cond, red_cond = conditions[col_header]
 
-        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {green_cond})"}]}, "format": {"textFormat": {"foregroundColor": COLORS["green"]}}}}, "index": 0}})
-        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {red_cond})"}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 1}})
-        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": f"=AND(NOT(ISBLANK({current_cell_a1})), ISBLANK({ref_cell_a1}))"}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 2}})
+        green_formula = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {green_cond})"
+        red_formula_comp = f"=AND(NOT(ISBLANK({current_cell_a1})), NOT(ISBLANK({ref_cell_a1})), {red_cond})"
+        red_formula_no_ref = f"=AND(NOT(ISBLANK({current_cell_a1})), ISBLANK({ref_cell_a1}))"
+
+        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": green_formula}]}, "format": {"textFormat": {"foregroundColor": COLORS["green"]}}}}, "index": 0}})
+        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula_comp}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 1}})
+        requests.append({"addConditionalFormatRule": {"rule": {"ranges": [rule_range], "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": red_formula_no_ref}]}, "format": {"textFormat": {"foregroundColor": COLORS["red"]}}}}, "index": 2}})
 
     if requests:
         service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
@@ -190,17 +201,13 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
 
     if target_col == -1:
         print(f"  -> Date '{date_label}' not in headers. Inserting new columns.")
-        # --- BAKE-IN LOGIC ---
-        # Before inserting, check if there's an existing block at the insertion point (START_COL)
-        # The header for the first data block is at row index 0.
         if len(sheet_headers) > START_COL and sheet_headers[START_COL]:
             bake_in_and_remove_formatting(service, SPREADSHEET_ID, sheet.id, START_COL, len(master_module_list))
         
-        # Now, insert the new columns.
         target_col = START_COL
         insert_req = {"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [insert_req]}).execute()
-        time.sleep(1) # Brief pause to allow API changes to settle if needed.
+        time.sleep(1)
 
     else:
         print(f"  -> Date '{date_label}' found. Updating columns in place at {col_to_a1(target_col)}.")
@@ -213,7 +220,6 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     print(f"  -> Writing data to sheet '{sheet.title}' starting at column {col_to_a1(target_col)}.")
     service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
     
-    # Apply fresh conditional formatting to the new/updated block
     apply_new_conditional_formatting(service, SPREADSHEET_ID, sheet.id, target_col, len(master_module_list))
     
     print(f"✅ Sheet '{sheet_name}' updated successfully.")
