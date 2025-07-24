@@ -63,7 +63,7 @@ def apply_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
         current_col_idx = target_col + i
         
         # The reference block's data starts 1 column after the block's start (e.g., data is in B, block starts at A)
-        ref_col_idx = (target_col - BLOCK_WIDTH) + 1 + i
+        ref_col_idx = 1 + i
 
         print(f"\n    -> LOG: Formatting rules for header '{col_header}':")
         print(f"       - Current data is in column: {col_to_a1(current_col_idx)} (index {current_col_idx})")
