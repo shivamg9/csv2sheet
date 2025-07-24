@@ -4,6 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials as GoogleCredentials
 from googleapiclient.discovery import build
 import time
+import json
 
 # --- CONFIGURATION ---
 SOURCE_DIR = "source"
@@ -43,41 +44,66 @@ def convert_cell(val):
     except (ValueError, TypeError):
         return str(val).strip()
 
-def bake_in_and_remove_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
+def bake_in_and_remove_formatting(service, sheet_id, sheet_gid, sheet_title, target_col, max_rows):
     """
     Reads the effective formatting of a data block, applies it directly,
     and then removes the conditional formatting rules that generated it.
     """
-    print(f"  -> Baking in formats for block starting at column {col_to_a1(target_col)}...")
+    print(f"\n[DEBUG] --- Starting format bake-in process ---")
+    print(f"[DEBUG] Sheet: '{sheet_title}' (GID: {sheet_gid}), Target Column Index: {target_col} ({col_to_a1(target_col)}), Max Data Rows: {max_rows}")
     requests = []
     
     data_end_col = target_col + NUM_DATA_COLS
-    bake_range_a1 = f'{col_to_a1(target_col)}{START_ROW_INDEX + 1}:{col_to_a1(data_end_col - 1)}{START_ROW_INDEX + max_rows}'
+    # Use the sheet title in the A1 notation to be explicit
+    bake_range_a1 = f"'{sheet_title}'!{col_to_a1(target_col)}{START_ROW_INDEX + 1}:{col_to_a1(data_end_col - 1)}{START_ROW_INDEX + max_rows}"
+
+    print(f"[DEBUG] Requesting sheet data for range: {bake_range_a1}")
+    print(f"[DEBUG] Fields requested: 'sheets(data(rowData(values(effectiveFormat))),conditionalFormats)'")
 
     try:
-        # Fetch only the necessary fields to be more efficient
         sheet_data = service.spreadsheets().get(
             spreadsheetId=sheet_id,
             ranges=[bake_range_a1],
-            fields='sheets(data(rowData(values(effectiveFormat))),conditionalFormats(ruleId,ranges))'
+            fields='sheets(data(rowData(values(effectiveFormat))),conditionalFormats)'
         ).execute()
     except Exception as e:
-        print(f"  -> WARNING: Could not retrieve sheet data for baking. Skipping. Error: {e}")
+        print(f"[DEBUG] ❌ ERROR: Could not retrieve sheet data for baking. Skipping. Error: {e}")
         return
 
     sheet_info = sheet_data.get('sheets', [{}])[0]
     rows_data = sheet_info.get('data', [{}])[0].get('rowData', [])
-    rules_to_delete = set()
-
+    
+    if not rows_data:
+        print(f"[DEBUG] ⚠️ WARNING: API response did not contain any rowData for range {bake_range_a1}. Cannot bake formats.")
+        return
+    
+    print(f"[DEBUG] Successfully received sheet data. Found {len(rows_data)} rows to process.")
+    
     # 1. Build requests to apply direct formatting based on effective format
+    print("\n[DEBUG] --- Analyzing cell colors to bake ---")
     for r_idx, row in enumerate(rows_data):
         cells = row.get('values', [])
         for c_idx, cell in enumerate(cells):
+            cell_address = f"{col_to_a1(target_col + c_idx)}{START_ROW_INDEX + r_idx + 1}"
             effective_format = cell.get('effectiveFormat', {})
-            if 'textFormat' in effective_format and 'foregroundColor' in effective_format['textFormat']:
-                color = effective_format['textFormat']['foregroundColor']
-                # Check against our specific conditional colors to avoid baking other formats
-                if color in [COLORS["red"], COLORS["green"]]:
+            text_format = effective_format.get('textFormat', {})
+            
+            if 'foregroundColor' in text_format:
+                # The API returns colors with all RGB values, sometimes slightly off (e.g., green might not be exactly 0.6)
+                # We will round the RGB values to compare them robustly.
+                color_api = text_format['foregroundColor']
+                r = round(color_api.get('red', 0), 1)
+                g = round(color_api.get('green', 0), 1)
+                b = round(color_api.get('blue', 0), 1)
+
+                matched_color = None
+                if r == 1.0 and g == 0.0 and b == 0.0:
+                    matched_color = "red"
+                elif r == 0.0 and g == 0.6 and b == 0.1:
+                    matched_color = "green"
+
+                if matched_color:
+                    print(f"  -> MATCH! Cell {cell_address}: Detected '{matched_color}'. Creating update request.")
                     requests.append({
                         "updateCell": {
                             "range": {
@@ -85,32 +111,49 @@ def bake_in_and_remove_formatting(service, sheet_id, sheet_gid, target_col, max_
                                 "startRowIndex": START_ROW_INDEX + r_idx, "endRowIndex": START_ROW_INDEX + r_idx + 1,
                                 "startColumnIndex": target_col + c_idx, "endColumnIndex": target_col + c_idx + 1,
                             },
-                            "rows": [{"values": [{"userEnteredFormat": {"textFormat": {"foregroundColor": color}}}]}],
+                            "rows": [{"values": [{"userEnteredFormat": {"textFormat": {"foregroundColor": COLORS[matched_color]}}}]}],
                             "fields": "userEnteredFormat.textFormat.foregroundColor"
                         }
                     })
 
     # 2. Find and build requests to delete the old conditional formatting rules
+    print("\n[DEBUG] --- Analyzing conditional rules to delete ---")
+    rules_to_delete = set()
     all_rules = sheet_info.get('conditionalFormats', [])
-    for rule in all_rules:
+    print(f"[DEBUG] Found {len(all_rules)} total conditional format rules on the sheet.")
+
+    for rule_index, rule in enumerate(all_rules):
         rule_id = rule.get('ruleId')
         for r in rule.get('ranges', []):
-            if r.get('startColumnIndex') == target_col and r.get('endColumnIndex') == data_end_col:
+            # We want to delete rules that apply to OUR block. Our script creates one rule per column.
+            # This check is now very specific.
+            if r.get('startColumnIndex') >= target_col and r.get('endColumnIndex') <= data_end_col:
+                print(f"  -> MATCH! Queuing rule with ID '{rule_id}' (at index {rule_index}) for deletion as it applies to the target range.")
                 rules_to_delete.add(rule_id)
 
     for rule_id in rules_to_delete:
-        requests.append({"deleteConditionalFormatRule": {"sheetId": sheet_gid, "index": 0, "ruleId": rule_id}})
+        # Deleting a rule shifts the index of subsequent rules, so it's safer to delete by ID.
+        requests.append({"deleteConditionalFormatRule": {"sheetId": sheet_gid, "ruleId": rule_id}})
 
+    # 3. Execute all requests in a single batch
+    print("\n[DEBUG] --- Preparing to execute batch update ---")
+    update_cell_reqs = [req for req in requests if 'updateCell' in req]
+    delete_rule_reqs = [req for req in requests if 'deleteConditionalFormatRule' in req]
+    print(f"[DEBUG] Preparing to execute batchUpdate with {len(requests)} total requests:")
+    print(f"  - {len(update_cell_reqs)} 'updateCell' requests (to bake colors).")
+    print(f"  - {len(delete_rule_reqs)} 'deleteConditionalFormatRule' requests.")
 
     if requests:
-        print(f"  -> LOG: Found {len(requests) - len(rules_to_delete)} cells to format and {len(rules_to_delete)} rules to delete. Executing batch update.")
         try:
+            print("[DEBUG] Executing batch update...")
             service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": requests}).execute()
+            print("[DEBUG] ✅ Batch update for baking formats successful.")
         except Exception as e:
-            print(f"  -> WARNING: Batch update for baking formats failed. Error: {e}")
+            print(f"[DEBUG] ❌ ERROR: Batch update for baking formats failed. Error: {e}")
+            # For deep debugging, print the entire request body
+            # print("[DEBUG] Failing request body:", json.dumps({"requests": requests}, indent=2))
     else:
-        print("  -> LOG: No conditional formatting found to bake in.")
-
+        print("[DEBUG] No requests to send. Nothing to bake or delete.")
 
 def apply_new_conditional_formatting(service, sheet_id, sheet_gid, target_col, max_rows):
     """Builds and executes all formatting requests for a NEW data block."""
@@ -135,8 +178,6 @@ def apply_new_conditional_formatting(service, sheet_id, sheet_gid, target_col, m
         current_cell_a1 = f"{col_to_a1(current_col_idx)}{START_ROW_INDEX + 1}"
         ref_cell_a1 = f"{col_to_a1(ref_col_idx)}{START_ROW_INDEX + 1}"
         
-        # --- FIX IS HERE ---
-        # Removed the leading "=" from the condition strings. The outer formula provides it.
         conditions = {
             "T":  (f"{current_cell_a1}={ref_cell_a1}", f"{current_cell_a1}<>{ref_cell_a1}"),
             "P":  (f"{current_cell_a1}>={ref_cell_a1}", f"{current_cell_a1}<{ref_cell_a1}"),
@@ -200,22 +241,26 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         target_col = sheet_headers.index(date_label)
 
     if target_col == -1:
-        print(f"  -> Date '{date_label}' not in headers. Inserting new columns.")
+        print(f"  -> Date '{date_label}' not in headers. Preparing to insert new columns.")
+        # --- BAKE-IN LOGIC ---
+        # Check if there's an existing block at the insertion point (START_COL)
         if len(sheet_headers) > START_COL and sheet_headers[START_COL]:
-            bake_in_and_remove_formatting(service, SPREADSHEET_ID, sheet.id, START_COL, len(master_module_list))
+            # Pass all necessary info, including the sheet's title for robust range requests
+            bake_in_and_remove_formatting(service, SPREADSHEET_ID, sheet.id, sheet.title, START_COL, len(master_module_list))
         
         target_col = START_COL
+        print(f"  -> Inserting {BLOCK_WIDTH} new columns at index {START_COL} ({col_to_a1(START_COL)})...")
         insert_req = {"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}
         service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [insert_req]}).execute()
-        time.sleep(1)
+        time.sleep(1) # Brief pause to allow API changes to settle.
 
     else:
         print(f"  -> Date '{date_label}' found. Updating columns in place at {col_to_a1(target_col)}.")
 
     update_body = {"valueInputOption": "USER_ENTERED", "data": [
-            {"range": f"{sheet.title}!{col_to_a1(target_col)}1", "values": [[date_label]]},
-            {"range": f"{sheet.title}!{col_to_a1(target_col)}2", "values": [csv_headers]},
-            {"range": f"{sheet.title}!{col_to_a1(target_col)}{START_ROW_INDEX + 1}", "values": aligned_data_block}
+            {"range": f"'{sheet.title}'!{col_to_a1(target_col)}1", "values": [[date_label]]},
+            {"range": f"'{sheet.title}'!{col_to_a1(target_col)}2", "values": [csv_headers]},
+            {"range": f"'{sheet.title}'!{col_to_a1(target_col)}{START_ROW_INDEX + 1}", "values": aligned_data_block}
         ]}
     print(f"  -> Writing data to sheet '{sheet.title}' starting at column {col_to_a1(target_col)}.")
     service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
@@ -230,6 +275,7 @@ def main():
         creds = GoogleCredentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
         service = build("sheets", "v4", credentials=creds)
         
+        # Use gspread for easier sheet handling like finding worksheets by name
         from oauth2client.service_account import ServiceAccountCredentials as GSpreadCredentials
         gspread_creds = GSpreadCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
         client = gspread.authorize(gspread_creds)
