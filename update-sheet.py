@@ -59,7 +59,6 @@ def create_bake_and_delete_requests(service, sheet_id, sheet_gid, sheet_title, t
     data_end_col = target_col + NUM_DATA_COLS
     bake_range_a1 = f"'{sheet_title}'!{col_to_a1(target_col)}{START_ROW_INDEX + 1}:{col_to_a1(data_end_col - 1)}{START_ROW_INDEX + max_rows}"
 
-    print(f"[DEBUG] Requesting sheet data for range: {bake_range_a1}")
     try:
         sheet_data = service.spreadsheets().get(
             spreadsheetId=sheet_id,
@@ -77,7 +76,6 @@ def create_bake_and_delete_requests(service, sheet_id, sheet_gid, sheet_title, t
         print(f"[DEBUG] ⚠️ WARNING: No rowData returned. Cannot bake formats.")
         return [], []
     
-    # Create baking requests
     for r_idx, row in enumerate(rows_data):
         for c_idx, cell in enumerate(row.get('values', [])):
             effective_format = cell.get('effectiveFormat', {})
@@ -89,7 +87,6 @@ def create_bake_and_delete_requests(service, sheet_id, sheet_gid, sheet_title, t
                 if matched_color_name:
                     bake_requests.append({"repeatCell": {"range": {"sheetId": sheet_gid, "startRowIndex": START_ROW_INDEX + r_idx, "endRowIndex": START_ROW_INDEX + r_idx + 1, "startColumnIndex": target_col + c_idx, "endColumnIndex": target_col + c_idx + 1}, "cell": {"userEnteredFormat": {"textFormat": {"foregroundColor": COLORS[matched_color_name]}}}, "fields": "userEnteredFormat.textFormat.foregroundColor"}})
     
-    # Create deletion requests
     indices_to_delete = []
     all_rules = sheet_info.get('conditionalFormats', [])
     for rule_index, rule in enumerate(all_rules):
@@ -114,7 +111,11 @@ def apply_new_conditional_formatting(service, sheet_id, sheet_gid, target_col, m
     # Standard Formatting
     requests.append({"updateDimensionProperties": {"range": {"sheetId": sheet_gid, "dimension": "COLUMNS", "startIndex": target_col, "endIndex": data_end_col}, "properties": {"pixelSize": 80}, "fields": "pixelSize"}})
     requests.append({"mergeCells": {"range": {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "mergeType": "MERGE_ALL"}})
-    requests.append({"repeatCell": {"range": {"sheetId": sheet_gid, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": target_col, "endIndex": data_end_col}, "cell": {"userEnteredFormat": {"backgroundColor": COLORS["light_grey_fill"], "textFormat": {"bold": True}}}, "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+    
+    # --- FIX IS HERE ---
+    # The key 'endIndex' has been corrected to 'endColumnIndex'.
+    requests.append({"repeatCell": {"range": {"sheetId": sheet_gid, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": target_col, "endColumnIndex": data_end_col}, "cell": {"userEnteredFormat": {"backgroundColor": COLORS["light_grey_fill"], "textFormat": {"bold": True}}}, "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+    
     border_range = {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": START_ROW_INDEX + max_rows, "startColumnIndex": target_col, "endColumnIndex": data_end_col}
     requests.append({"updateBorders": {"range": border_range, "top": BORDER, "bottom": BORDER, "left": BORDER, "right": BORDER}})
     requests.append({"updateBorders": {"range": border_range, "innerHorizontal": BORDER, "innerVertical": BORDER}})
@@ -157,7 +158,6 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         print(f"Worksheet '{sheet_name}' not found. Creating it.")
         sheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="50")
 
-    # (CSV and data preparation logic remains the same)
     first_block_rows = []
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = csv.reader(f)
@@ -192,18 +192,15 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
         print(f"  -> Date '{date_label}' not found. Beginning column insertion process.")
         target_col = START_COL
         
-        # Check if there's an existing data block that needs its formats preserved
         if len(sheet_headers) > START_COL and sheet_headers[START_COL]:
             bake_reqs, delete_reqs = create_bake_and_delete_requests(service, SPREADSHEET_ID, sheet.id, sheet.title, START_COL, len(master_module_list))
 
-            # --- STAGE 1: BAKE THE COLORS ---
             if bake_reqs:
                 print(f"[DEBUG] STAGE 1: Sending {len(bake_reqs)} requests to bake colors.")
                 service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": bake_reqs}).execute()
-                print("[DEBUG] Bake request sent. Pausing for 3 seconds to allow API to process...")
-                time.sleep(3) # The crucial pause
+                print("[DEBUG] Bake request sent. Pausing for 3 seconds...")
+                time.sleep(3)
             
-            # --- STAGE 2: DELETE RULES AND INSERT COLUMNS ---
             requests_for_stage_2 = delete_reqs
             print(f"[DEBUG] STAGE 2: Preparing to delete {len(delete_reqs)} rules and insert columns.")
             
@@ -214,7 +211,7 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
             service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests_for_stage_2}).execute()
             print("[DEBUG] Deletion and insertion complete.")
         
-        else: # No data block to preserve, just insert the columns
+        else:
             print("  -> No existing data at insertion point. Inserting new columns directly.")
             insert_req = {"insertDimension": {"range": {"sheetId": sheet.id, "dimension": "COLUMNS", "startIndex": START_COL, "endIndex": START_COL + BLOCK_WIDTH}, "inheritFromBefore": False}}
             service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [insert_req]}).execute()
@@ -222,7 +219,6 @@ def update_sheet(service, spreadsheet, sheet_name, csv_path):
     else:
         print(f"  -> Date '{date_label}' found. Updating columns in place.")
 
-    # (Data writing and new formatting logic remains the same)
     update_body = {"valueInputOption": "USER_ENTERED", "data": [{"range": f"'{sheet.title}'!{col_to_a1(target_col)}1", "values": [[date_label]]}, {"range": f"'{sheet.title}'!{col_to_a1(target_col)}2", "values": [csv_headers]}, {"range": f"'{sheet.title}'!{col_to_a1(target_col)}{START_ROW_INDEX + 1}", "values": aligned_data_block}]}
     print(f"  -> Writing data to sheet '{sheet.title}' starting at column {col_to_a1(target_col)}.")
     service.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=update_body).execute()
